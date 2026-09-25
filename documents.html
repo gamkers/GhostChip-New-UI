@@ -758,6 +758,21 @@
       height: 16px;
       color: var(--g);
     }
+    /* ══ NEW BADGE ══ */
+    .new-badge {
+      display: inline-block;
+      background: var(--g);
+      color: #000;
+      font-size: 0.5rem;
+      font-weight: 800;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      padding: 2px 5px;
+      border-radius: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+      line-height: 1.4;
+    }
   </style>
 </head>
 <body>
@@ -776,7 +791,7 @@
         <div class="subtitle">ESP32-S3 Hardware & Software Operations Manual</div>
       </div>
     </div>
-    <div class="version-tag">FIRMWARE: GHOST CHIP v2.0</div>
+    <div class="version-tag">FIRMWARE v3.3.1</div>
   </header>
 
   <!-- ══ MAIN CONTAINER ══ -->
@@ -808,6 +823,7 @@
           <span class="sub-link" id="link-conn-proto" onclick="loadPage('conn-proto', this)">WiFi Access Credentials</span>
           <span class="sub-link" id="link-conn-modes" onclick="loadPage('conn-modes', this)">Direct vs PWA App</span>
           <span class="sub-link" id="link-conn-ai-rules" onclick="loadPage('conn-ai-rules', this)">AI Network Setup</span>
+          <span class="sub-link" id="link-conn-autoconnect" onclick="loadPage('conn-autoconnect', this)">SD Auto-Connect <span class="new-badge">NEW</span></span>
         </div>
       </div>
 
@@ -820,8 +836,9 @@
         </button>
         <div class="subtopics">
           <span class="sub-link" id="link-feat-ducky" onclick="loadPage('feat-ducky', this)">DuckyScript Syntax</span>
+          <span class="sub-link" id="link-feat-autorun" onclick="loadPage('feat-autorun', this)">AutoRun on Boot <span class="new-badge">NEW</span></span>
           <span class="sub-link" id="link-feat-sniffer" onclick="loadPage('feat-sniffer', this)">WiFi & BLE Sniffer</span>
-          <span class="sub-link" id="link-feat-ai" onclick="loadPage('feat-ai', this)">Groq Llama-3 AI</span>
+          <span class="sub-link" id="link-feat-ai" onclick="loadPage('feat-ai', this)">Groq AI — Qwen 3.8 27B</span>
           <span class="sub-link" id="link-feat-ghostesp" onclick="loadPage('feat-ghostesp', this)">GhostESP Firmware</span>
         </div>
       </div>
@@ -834,15 +851,26 @@
           4. Diagnostic & Audit Tools
         </button>
         <div class="subtopics">
-          <span class="sub-link" id="link-tool-file" onclick="loadPage('tool-file', this)">📁 Tool: File Manager</span>
-          <span class="sub-link" id="link-tool-ai" onclick="loadPage('tool-ai', this)">🤖 Tool: AI Assistant</span>
-          <span class="sub-link" id="link-tool-builder" onclick="loadPage('tool-builder', this)">🛠️ Tool: Script Builder</span>
-          <span class="sub-link" id="link-tool-templates" onclick="loadPage('tool-templates', this)">🛡️ Tool: Payload Templates</span>
-          <span class="sub-link" id="link-tool-keyboard" onclick="loadPage('tool-keyboard', this)">🎹 Tool: Live Keyboard</span>
-          <span class="sub-link" id="link-tool-neopixel" onclick="loadPage('tool-neopixel', this)">💡 Tool: NeoPixel LED</span>
-          <span class="sub-link" id="link-tool-info" onclick="loadPage('tool-info', this)">🌐 Tool: Device Info</span>
-          <span class="sub-link" id="link-tool-simulator" onclick="loadPage('tool-simulator', this)">💾 Tool: Payload Simulator</span>
-          <span class="sub-link" id="link-tool-ota" onclick="loadPage('tool-ota', this)">💿 Tool: OTA Flash Updater</span>
+          <span class="sub-link" id="link-tool-file" onclick="loadPage('tool-file', this)">📁 File Manager</span>
+          <span class="sub-link" id="link-tool-keyboard" onclick="loadPage('tool-keyboard', this)">🎹 Live Keyboard</span>
+          <span class="sub-link" id="link-tool-mouse" onclick="loadPage('tool-mouse', this)">🖱 Remote Mouse <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-gamepad" onclick="loadPage('tool-gamepad', this)">🎮 Gamepad <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-mouseutil" onclick="loadPage('tool-mouseutil', this)">🖱 Mouse Utility <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-media" onclick="loadPage('tool-media', this)">🎵 Media Remote <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-ai" onclick="loadPage('tool-ai', this)">🤖 AI Assistant</span>
+          <span class="sub-link" id="link-tool-aiagent" onclick="loadPage('tool-aiagent', this)">🧠 AI Agent <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-codetyper" onclick="loadPage('tool-codetyper', this)">💻 Code Typer <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-prompter" onclick="loadPage('tool-prompter', this)">✨ Prompt Enhancer <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-builder" onclick="loadPage('tool-builder', this)">🛠️ Script Builder</span>
+          <span class="sub-link" id="link-tool-templates" onclick="loadPage('tool-templates', this)">🛡️ Payload Templates</span>
+          <span class="sub-link" id="link-tool-recorder" onclick="loadPage('tool-recorder', this)">⏺ Action Recorder <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-favourites" onclick="loadPage('tool-favourites', this)">⭐ Favourites <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-vault" onclick="loadPage('tool-vault', this)">🔒 Vault <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-shortcuts" onclick="loadPage('tool-shortcuts', this)">⚡ Shortcuts <span class="new-badge">NEW</span></span>
+          <span class="sub-link" id="link-tool-neopixel" onclick="loadPage('tool-neopixel', this)">💡 NeoPixel LED</span>
+          <span class="sub-link" id="link-tool-info" onclick="loadPage('tool-info', this)">🌐 Device Info</span>
+          <span class="sub-link" id="link-tool-simulator" onclick="loadPage('tool-simulator', this)">💾 Payload Simulator</span>
+          <span class="sub-link" id="link-tool-ota" onclick="loadPage('tool-ota', this)">💿 OTA Flash Updater</span>
         </div>
       </div>
 
@@ -911,7 +939,7 @@
               <div class="step-num">3</div>
               <div class="step-content">
                 <h3>Verify Wireless AP Broadcast</h3>
-                <p>Once powered, the internal ESP32-S3 boots up within 3 seconds. Scan for available wireless networks on your mobile phone or PC, select the network named <strong>Ghostchip</strong>, and enter the password <strong>GhostChip@14</strong>.</p>
+                <p>Once powered, the internal ESP32-S3 boots up within 3 seconds. Scan for available wireless networks on your mobile phone or PC, select the network named <strong>Ghostchip</strong>, and enter the password <strong>ghostchip@14</strong>.</p>
               </div>
             </div>
           </div>
@@ -919,6 +947,11 @@
           <div class="alert-box">
             <strong>ℹ️ Initial Boot Cycle</strong>
             Hardware boot enumeration takes exactly <strong>3 seconds</strong>. After this timing threshold passes, the local Wi-Fi radio wakes up and broadcasts its default Access Point gateway.
+
+          <div class="alert-box warn" style="margin-top:24px;">
+            <strong>🔴 BOOT Button — Hardware Kill Switch</strong>
+            Pressing the physical <strong>BOOT</strong> button on the GhostChip board at any time during operation instantly <strong>aborts any running DuckyScript payload</strong> and <strong>stops any active deauth test</strong>. The NeoPixel flashes red briefly to confirm. This is your emergency hardware override — no app connection needed.
+          </div>
           </div>
         </div>
       </section>
@@ -984,7 +1017,7 @@
             </div>
             <div class="tech-card">
               <h4>USB-OTG HID Controller</h4>
-              <p>Direct native USB-HID bus interfaces. Simulates standard USB Boot Keyboard layout models, bypassing operating system driver warning dialogs completely.</p>
+              <p>Direct native USB-HID bus interfaces. Simulates standard USB Composite HID device — Keyboard, Mouse, and Gamepad simultaneously — bypassing OS driver warning dialogs. USB Product: <em>GhostChip Pro</em>, PID: <code>0x8104</code>.</p>
             </div>
             <div class="tech-card">
               <h4>WS2812B NeoPixel RGB</h4>
@@ -993,6 +1026,10 @@
             <div class="tech-card">
               <h4>SDIO SD Interface</h4>
               <p>Direct low-latency data lines running to the MicroSD slot, facilitating instant reads/writes of exfiltrated data blocks.</p>
+            </div>
+            <div class="tech-card">
+              <h4>NVS Persistent Settings</h4>
+              <p>API key, NeoPixel color/brightness/on-off state, and Typing Delay are stored in <strong>NVS (Non-Volatile Storage)</strong> flash and survive power cycles and reboots automatically — no reconfiguration needed after powering off.</p>
             </div>
           </div>
 
@@ -1100,7 +1137,7 @@
               </tr>
               <tr>
                 <td><strong>WPA2 Password</strong></td>
-                <td><code class="accent-text" style="font-size:1rem; font-weight:700;">GhostChip@14</code></td>
+                <td><code class="accent-text" style="font-size:1rem; font-weight:700;">ghostchip@14</code></td>
                 <td>Secured using WPA2-PSK protocol encryption.</td>
               </tr>
               <tr>
@@ -1123,7 +1160,7 @@
 
           <div class="alert-box">
             <strong>ℹ️ Connection Step:</strong>
-            Turn on your smartphone's Wi-Fi, select the SSID <strong>Ghostchip</strong>, type <strong>GhostChip@14</strong>, and wait for the connection icon. Some operating systems may show a warning saying "No Internet Access" — this is normal, tap <strong>Keep Connected</strong> to proceed.
+            Turn on your smartphone's Wi-Fi, select the SSID <strong>Ghostchip</strong>, type <strong>ghostchip@14</strong>, and wait for the connection icon. Some operating systems may show a warning saying "No Internet Access" — this is normal, tap <strong>Keep Connected</strong> to proceed.
           </div>
         </div>
       </section>
@@ -1217,6 +1254,30 @@
       </section>
 
 
+
+      <!-- Subtopic: conn-autoconnect -->
+      <section class="doc-page" id="page-conn-autoconnect">
+        <div class="card">
+          <h2 class="card-title">📂 SD Auto-Connect — Automatic WiFi Bridge on Boot <span class="new-badge">NEW</span></h2>
+          <p>GhostChip can automatically join your local WiFi router on every boot without any manual Settings step — by reading stored credentials directly from the MicroSD card.</p>
+          <div class="alert-box">
+            <strong>✅ How It Works:</strong>
+            On boot, GhostChip scans visible WiFi networks. For each network found, it checks if a file named <code>/wificonnect/&lt;SSID&gt;.txt</code> exists on the SD card. If found, it reads the password and connects automatically in AP+STA mode — enabling AI features without any manual step.
+          </div>
+          <h3 style="margin:24px 0 12px; font-weight:700;">Setup Instructions</h3>
+          <div class="steps">
+            <div class="step-item"><div class="step-num">1</div><div class="step-content"><h3>Create the wificonnect Directory</h3><p>On your FAT32 MicroSD card, create a folder named exactly <code>wificonnect</code> in the SD root.</p></div></div>
+            <div class="step-item"><div class="step-num">2</div><div class="step-content"><h3>Create a Credential File</h3><p>Inside <code>/wificonnect/</code>, create a <code>.txt</code> file named after your WiFi SSID. E.g. for network <code>HomeRouter</code>, create <code>/wificonnect/HomeRouter.txt</code>.</p></div></div>
+            <div class="step-item"><div class="step-num">3</div><div class="step-content"><h3>Write the Password</h3><p>Open the file and type the WiFi password as plain text — no quotes, no extra newlines.</p><div class="code-block">YourWiFiPassword123</div></div></div>
+            <div class="step-item"><div class="step-num">4</div><div class="step-content"><h3>Boot GhostChip</h3><p>Insert SD and power up. GhostChip scans, finds your SSID, reads the credential file, and auto-connects in AP+STA mode. Multiple networks are supported — first match wins.</p></div></div>
+          </div>
+          <div class="alert-box warn">
+            <strong>⚠️ Security Note:</strong>
+            Passwords are stored as plain text on the SD card. Keep the card physically secure.
+          </div>
+        </div>
+      </section>
+
       <!-- ============================================== -->
       <!-- GROUP 3: FEATURES GUIDE                        -->
       <!-- ============================================== -->
@@ -1258,6 +1319,11 @@
                 <td><code>STRING</code></td>
                 <td>Simulates rapid serial typing of the text string following the keyword. Supports symbols, numbers, and capital letters.</td>
                 <td><code>STRING echo Hello World!</code></td>
+              </tr>
+              <tr>
+                <td><code>STRINGLN</code> <span class="new-badge">NEW</span></td>
+                <td>Types the text following the keyword then immediately presses <strong>ENTER</strong>. Shorthand for <code>STRING</code> + <code>ENTER</code> on a single line.</td>
+                <td><code>STRINGLN ipconfig /all</code></td>
               </tr>
               <tr>
                 <td><code>ENTER</code></td>
@@ -1363,7 +1429,7 @@
             <tbody>
               <tr>
                 <td><strong>GUI</strong></td>
-                <td><code>WINDOWS</code>, <code>COMMAND</code></td>
+                <td><code>WINDOWS</code>, <code>COMMAND</code>, <code>META</code></td>
                 <td><code>GUI r</code> (Opens Run menu on Windows) <br> <code>GUI SPACE</code> (Opens Spotlight search on macOS)</td>
               </tr>
               <tr>
@@ -1394,7 +1460,46 @@
             </div>
           </div>
 
-          <h3 style="margin:24px 0 12px; font-weight:700;">5. The Repeater Block Command</h3>
+
+          <h3 style="margin:24px 0 12px; font-weight:700;">5a. Function Keys (F1–F12) <span class="new-badge">NEW</span></h3>
+          <p>Full function key support from F1 through F12. Use alone or combined with modifiers:</p>
+          <div class="code-block">F1  F2  F3  F4  F5  F6  F7  F8  F9  F10  F11  F12
+
+<span style="color:var(--dim)">Examples:</span>
+GUI F4        (Close active window / tab on Windows)
+CTRL F5       (Hard-refresh browser)
+ALT F4        (Quit active application)
+CTRL SHIFT F5 (Force reload)</div>
+
+          <h3 style="margin:24px 0 12px; font-weight:700;">5b. Special System Keys <span class="new-badge">NEW</span></h3>
+          <table class="tech-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Aliases</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>PRINTSCREEN</code></td>
+                <td>—</td>
+                <td>Takes a screenshot on the host machine (copies to clipboard on Windows).</td>
+              </tr>
+              <tr>
+                <td><code>PAUSE</code></td>
+                <td><code>BREAK</code></td>
+                <td>Presses the Pause/Break key. Useful for interrupting batch scripts or opening System Properties (<code>GUI PAUSE</code>).</td>
+              </tr>
+              <tr>
+                <td><code>MENU</code></td>
+                <td><code>APP</code></td>
+                <td>Presses the Application/Menu key — simulates a right-click context menu on the focused element.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3 style="margin:24px 0 12px; font-weight:700;">5c. The Repeater Block Command</h3>
           <p>To avoid copy-pasting the same instruction multiple times, the <code>REPEAT</code> keyword duplicates the <strong>exact action from the immediately preceding line</strong>:</p>
           <div class="code-block">
             DOWNARROW<br>
@@ -1460,6 +1565,69 @@
             <strong>⚠️ Keyboard Layout Profiles Warning:</strong>
             Standard BadUSB key injections are mapped to standard <strong>US English</strong> keyboard layout configurations. If your target computer is set to a different regional layout (e.g., AZERTY, QWERTZ, UK English), some typed characters (like slashes, backslashes, colon, or quotes) will map incorrectly. Ensure the host is set to a US layout or design payloads to handle character deviations accordingly.
           </div>
+
+          <h3 style="margin:30px 0 12px; font-weight:700; border-top:1px solid var(--b1); padding-top:24px;">⚙️ Typing Speed Control <span class="new-badge">NEW</span></h3>
+          <p>The firmware caps the per-keystroke delay at <strong>40ms maximum</strong> for reliable injection. The global inter-key gap is configurable in <strong>Settings → Typing Delay</strong> and saved persistently to NVS flash across reboots.</p>
+          <table class="tech-table">
+            <thead><tr><th>Script Command</th><th>Recommended Value</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td><code>DELAY 3000</code> (first line)</td><td>3000ms</td><td>Wait for target OS to enumerate USB HID driver after plug-in.</td></tr>
+              <tr><td><code>DEFAULTDELAY 150</code></td><td>150ms</td><td>Add inter-line pause for slower target systems.</td></tr>
+              <tr><td><strong>Settings → Typing Delay</strong></td><td>0–40ms</td><td>Global inter-keystroke gap — saved to NVS flash, persists across reboots.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+
+      <!-- Subtopic: feat-autorun -->
+      <section class="doc-page" id="page-feat-autorun">
+        <div class="card">
+          <h2 class="card-title">🚀 AutoRun on Boot <span class="new-badge">NEW</span></h2>
+          <p>GhostChip can automatically execute a DuckyScript payload <strong>3 seconds after boot</strong> with zero user interaction — ideal for fully autonomous drop deployments.</p>
+
+          <div class="alert-box danger">
+            <strong>⚠️ Authorized Use Only:</strong>
+            AutoRun executes keystrokes on whatever computer the device is plugged into. Only use this on systems you own or have explicit written authorization to test.
+          </div>
+
+          <h3 style="margin:24px 0 12px; font-weight:700;">How to Set Up AutoRun via SD Card</h3>
+          <div class="steps">
+            <div class="step-item">
+              <div class="step-num">1</div>
+              <div class="step-content">
+                <h3>Create the autorun Directory</h3>
+                <p>On your FAT32 MicroSD card, create a folder named <code>autorun</code> in the root directory.</p>
+              </div>
+            </div>
+            <div class="step-item">
+              <div class="step-num">2</div>
+              <div class="step-content">
+                <h3>Place Your Script</h3>
+                <p>Save your DuckyScript payload as <code>/autorun/autorun.txt</code>. The filename must be exactly <code>autorun.txt</code>.</p>
+              </div>
+            </div>
+            <div class="step-item">
+              <div class="step-num">3</div>
+              <div class="step-content">
+                <h3>Boot GhostChip</h3>
+                <p>Plug the device into the target computer. After the built-in <strong>3 second delay</strong>, the script executes automatically.</p>
+              </div>
+            </div>
+          </div>
+
+          <h3 style="margin:24px 0 12px; font-weight:700;">Set AutoRun from the Dashboard</h3>
+          <p>You can also configure the autorun script directly from the app: In the DuckyScript editor, click the red <strong>AUTORUN</strong> button in the toolbar. This saves the current editor script to <code>/autorun/autorun.txt</code> on the SD card automatically — no manual file copying needed.</p>
+
+          <div class="alert-box">
+            <strong>💡 Best Practice:</strong>
+            Always start your autorun script with <code>DELAY 3000</code> to give the target OS time to load USB HID drivers before any keystrokes are sent.
+          </div>
+
+          <div class="alert-box warn">
+            <strong>🔴 Emergency Stop:</strong>
+            Press the physical <strong>BOOT</strong> button on the GhostChip board at any time to instantly abort the running autorun script. The NeoPixel will flash red briefly to confirm the kill.
+          </div>
         </div>
       </section>
 
@@ -1502,7 +1670,7 @@
       <!-- Subtopic 9: feat-ai -->
       <section class="doc-page" id="page-feat-ai">
         <div class="card">
-          <h2 class="card-title">🤖 Groq Llama-3 AI Engine & Voice Controls</h2>
+          <h2 class="card-title">🤖 Groq AI Engine — Qwen 3.8 27B & Voice Controls</h2>
           <p>The GhostChip features real-time neural payload compilation, translating plain English prompts into standard executable DuckyScript payloads instantly.</p>
 
           <div class="steps">
@@ -1700,6 +1868,328 @@
       <!-- GROUP 4: UTILITIES DRAWER (Detailed Tools)      -->
       <!-- ============================================== -->
 
+
+      <!-- Tool: Remote Mouse -->
+      <section class="doc-page" id="page-tool-mouse">
+        <div class="card">
+          <h2 class="card-title">🖱 Tool: Remote Mouse <span class="new-badge">NEW</span></h2>
+          <p>Control the target computer's mouse cursor remotely from your phone via USB HID mouse emulation. No drivers needed on the host — all commands are native HID reports.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Touchpad / Trackpad</h4><p>Swipe on the virtual touchpad area to move the cursor. Relative movement values are sent over HID at each touch event.</p></div>
+            <div class="tech-card"><h4>Click Buttons</h4><p>Left click, right click, and middle click buttons with hold support for drag operations.</p></div>
+            <div class="tech-card"><h4>Scroll Wheel</h4><p>Scroll up and down by sending USB scroll wheel HID events. Works in any application on any OS.</p></div>
+          </div>
+          <div class="alert-box">
+            <strong>ℹ️ HID Composite Device:</strong>
+            GhostChip presents as a composite USB device — keyboard, mouse, and gamepad are all active simultaneously. No mode switching is needed.
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Advanced Gestures & Usage</h3>
+          <p>The Remote Mouse tool supports multi-touch simulation natively. When using a mobile device, tapping on the trackpad area will immediately send a left-click event. For drag-and-drop operations, use the dedicated click-and-hold buttons below the trackpad.</p>
+          <div class="code-block" style="margin-top:10px;">
+// Internal HID Report Format (For reference):
+// Byte 0: Buttons (Bit 0: Left, Bit 1: Right, Bit 2: Middle)
+// Byte 1: X displacement (-127 to +127)
+// Byte 2: Y displacement (-127 to +127)
+// Byte 3: Scroll wheel (-127 to +127)
+          </div>
+          <h3 style="margin:24px 0 12px; font-weight:700;">Troubleshooting</h3>
+          <p>If the cursor moves erratically, ensure the target OS does not have extreme mouse acceleration enabled, as absolute physical movements from the phone screen are translated into relative HID displacement ticks.</p>
+</div>
+      </section>
+
+      <!-- Tool: Gamepad -->
+      <section class="doc-page" id="page-tool-gamepad">
+        <div class="card">
+          <h2 class="card-title">🎮 Tool: Gamepad Controller <span class="new-badge">NEW</span></h2>
+          <p>A virtual gamepad that sends USB HID gamepad reports to the target computer. Supports dual analog sticks, 32 buttons, hat switch (D-Pad), and 6 axes — recognized by Windows, macOS, and Linux as a standard USB gamepad.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Dual Analog Sticks</h4><p>X/Y axes for left stick, RX/RY for right stick. Values range from -127 to +127.</p></div>
+            <div class="tech-card"><h4>32 Buttons + Hat</h4><p>Full 32-button bitmask and 8-direction hat switch for D-Pad simulation.</p></div>
+            <div class="tech-card"><h4>Triggers (Z / RZ)</h4><p>Z and RZ axes for left and right analog trigger simulation.</p></div>
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Supported Input Mapping</h3>
+          <table class="tech-table">
+            <thead>
+              <tr><th>Component</th><th>Axis/Button ID</th><th>Common Usage</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Left Stick</td><td>X / Y Axes</td><td>Movement / Steering</td></tr>
+              <tr><td>Right Stick</td><td>RX / RY Axes</td><td>Camera Control / Aiming</td></tr>
+              <tr><td>Triggers</td><td>Z / RZ Axes</td><td>Accelerate / Fire</td></tr>
+              <tr><td>Face Buttons</td><td>Buttons 1-4</td><td>A, B, X, Y (or Cross, Circle, Square, Triangle)</td></tr>
+              <tr><td>D-Pad</td><td>Hat Switch (8-way)</td><td>Menu Navigation</td></tr>
+            </tbody>
+          </table>
+          <p style="margin-top:16px;">The gamepad acts as a generic USB Joystick. On Windows, it can be tested natively via <code>joy.cpl</code> in the Run menu. Modern browsers support gamepad APIs, making this tool compatible with cloud gaming services (like Xbox Cloud Gaming or GeForce Now) running on the target machine.</p>
+</div>
+      </section>
+
+      <!-- Tool: Mouse Utility -->
+      <section class="doc-page" id="page-tool-mouseutil">
+        <div class="card">
+          <h2 class="card-title">🖱 Tool: Mouse Utility <span class="new-badge">NEW</span></h2>
+          <p>Advanced mouse automation tools including an auto-clicker, mouse jiggler, and precision cursor control — all delivered as native USB HID mouse reports.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Auto Clicker</h4><p>Configure interval, button (left/right/middle), and click count. Automated clicking at the set rate — useful for form testing and UI automation.</p></div>
+            <div class="tech-card"><h4>Mouse Jiggler</h4><p>Moves the cursor by a tiny random delta at a configurable interval to prevent screen lock or screensaver activation on the host.</p></div>
+            <div class="tech-card"><h4>Precision Move</h4><p>Send exact relative X/Y movement values for fine-grained cursor positioning.</p></div>
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Automation Scenarios</h3>
+          <div class="steps">
+            <div class="step-item">
+              <div class="step-num">1</div>
+              <div class="step-content">
+                <h3>Preventing System Sleep</h3>
+                <p>Enable the <strong>Mouse Jiggler</strong> with an interval of 5000ms. The system will receive a micro-movement every 5 seconds, completely preventing screen locks during long audits or data extractions without interfering with user input.</p>
+              </div>
+            </div>
+            <div class="step-item">
+              <div class="step-num">2</div>
+              <div class="step-content">
+                <h3>Form Spamming / Kiosk Bypasses</h3>
+                <p>Use the <strong>Auto Clicker</strong> set to a 50ms interval. Position the cursor over the target button and activate. GhostChip will inject rapid left-clicks, useful for testing rate limits or clearing dialog boxes.</p>
+              </div>
+            </div>
+          </div>
+          <div class="alert-box">
+            <strong>💡 Pro Tip:</strong>
+            The Mouse Utility tools run autonomously on the ESP32-S3's background thread. You can start the Jiggler, then navigate to other tabs in the GhostChip app (like the AI Agent or Scripts) — the jiggler will continue running in the background until explicitly stopped.
+          </div>
+</div>
+      </section>
+
+      <!-- Tool: Media Remote -->
+      <section class="doc-page" id="page-tool-media">
+        <div class="card">
+          <h2 class="card-title">🎵 Tool: Media Remote <span class="new-badge">NEW</span></h2>
+          <p>Control media playback on the target computer using USB HID Consumer Control reports. Works in any OS with any media player — no focus or app switching needed.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Playback Controls</h4><p>⏯ Play/Pause, ⏮ Previous Track, ⏭ Next Track — sent as standard HID Consumer Control codes.</p></div>
+            <div class="tech-card"><h4>Volume Controls</h4><p>🔉 Volume Down, 🔊 Volume Up, 🔇 Mute — controls OS media volume independently from keyboard HID, without affecting keystroke focus.</p></div>
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">OS Compatibility & Behavior</h3>
+          <p>Media keys are sent via the specialized USB HID Consumer Control interface, which operates independently from the standard keyboard interface.</p>
+          <ul style="margin-left:20px; line-height:1.6; color:var(--dim);">
+            <li><strong>Windows:</strong> Controls the global media session (Spotify, Chrome, VLC) regardless of which app is focused. The volume overlay will appear natively.</li>
+            <li><strong>macOS:</strong> Maps directly to the physical media keys (F7-F12 equivalents) on Apple keyboards.</li>
+            <li><strong>Linux:</strong> Handled by the desktop environment's media daemon (e.g., MPRIS).</li>
+          </ul>
+          <h3 style="margin:24px 0 12px; font-weight:700;">Prank & Distraction Vectors</h3>
+          <p>Media controls are highly effective for distraction during physical engagements. Rapidly toggling Volume Up to 100% and triggering Play can distract a target or force them to lock their workstation and remove headphones, creating a window of opportunity.</p>
+</div>
+      </section>
+
+      <!-- Tool: AI Agent -->
+      <section class="doc-page" id="page-tool-aiagent">
+        <div class="card">
+          <h2 class="card-title">🧠 Tool: AI Agent <span class="new-badge">NEW</span></h2>
+          <p>An autonomous agent powered by the Groq AI engine that plans and executes multi-step device workflows — combining DuckyScript execution, file management, and system queries in one coordinated operation.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Multi-Step Planning</h4><p>Describe a complex goal (e.g., "Extract WiFi passwords and save to SD"). The agent breaks it into sub-tasks and executes them in sequence.</p></div>
+            <div class="tech-card"><h4>Tool Integration</h4><p>The agent can call device APIs (execute HID, read/write SD files, query device info) as part of its autonomous workflow.</p></div>
+            <div class="tech-card"><h4>Execution Log</h4><p>Real-time step-by-step log of every action taken — transparent and auditable. Abort at any time with the BOOT button.</p></div>
+          </div>
+          <div class="alert-box warn">
+            <strong>⚠️ Autonomous Operation:</strong>
+            The AI Agent can execute keystrokes and file operations without step-by-step confirmation. Review the plan before confirming. Use only on authorized systems.
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Agent Workflow Breakdown</h3>
+          <p>When given a high-level task, the Groq-powered AI Agent follows a strict ReAct (Reasoning and Acting) loop:</p>
+          <div class="code-block" style="margin-top:10px;">
+1. <strong>[THOUGHT]</strong> Analyzes the user's prompt and the target operating system.
+2. <strong>[PLAN]</strong> Generates a sequence of HID commands to achieve the first step.
+3. <strong>[ACTION]</strong> Executes the commands on the target machine via GhostChip.
+4. <strong>[OBSERVATION]</strong> Reads results if exfiltrated to the SD card, or assumes success based on timing.
+5. <strong>[THOUGHT]</strong> Determines if the ultimate goal is met, or if more steps are needed.
+          </div>
+          
+          <h3 style="margin:24px 0 12px; font-weight:700;">Example Prompts</h3>
+          <ul style="margin-left:20px; line-height:1.6; color:var(--dim);">
+            <li><strong style="color:var(--white);">"Open a hidden PowerShell window and disable Windows Defender real-time protection."</strong></li>
+            <li><strong style="color:var(--white);">"Extract the saved WiFi passwords and write them to a file named 'wifi.csv' on my desktop."</strong></li>
+            <li><strong style="color:var(--white);">"Create a reverse shell connecting back to 10.0.0.5 on port 1337."</strong></li>
+          </ul>
+</div>
+      </section>
+
+      <!-- Tool: Code Typer -->
+      <section class="doc-page" id="page-tool-codetyper">
+        <div class="card">
+          <h2 class="card-title">💻 Tool: Code Typer <span class="new-badge">NEW</span></h2>
+          <p>Generate code in any programming language using AI, then physically type it character-by-character into any text editor or terminal on the target machine via USB HID. Perfect for deploying scripts without clipboard access.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>AI Code Generation</h4><p>Describe what you need (e.g., "Python reverse shell to 192.168.1.100:4444"). The Groq AI generates the code in the requested language.</p></div>
+            <div class="tech-card"><h4>USB Type-Out</h4><p>Click <strong>Type on Target</strong> to physically type the generated code as keyboard HID input on the connected computer — no clipboard or paste needed.</p></div>
+            <div class="tech-card"><h4>Speed Control</h4><p>Adjust typing speed before execution. Use slower speed for terminals that may drop characters on fast machines.</p></div>
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Overcoming the Clipboard Barrier</h3>
+          <p>During physical access, you often cannot simply "paste" complex scripts into a target machine, especially if clipboard syncing is disabled or if you're restricted to a hypervisor console (like Proxmox or ESXi) or an RDP session that blocks clipboard transfer.</p>
+          <p>The Code Typer solves this by acting as a physical keyboard. It translates raw code into thousands of sequential keystrokes.</p>
+          
+          <h3 style="margin:24px 0 12px; font-weight:700;">Typing Profiles</h3>
+          <table class="tech-table">
+            <thead>
+              <tr><th>Speed Setting</th><th>Use Case</th><th>Reliability</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><strong>Instant (0ms)</strong></td><td>Modern local OS (Windows/Mac)</td><td>High — OS buffers handle it</td></tr>
+              <tr><td><strong>Fast (10ms)</strong></td><td>Standard Terminals</td><td>High</td></tr>
+              <tr><td><strong>Medium (25ms)</strong></td><td>Remote Desktop (RDP / VNC)</td><td>Medium — Prevents dropped frames</td></tr>
+              <tr><td><strong>Slow (40ms)</strong></td><td>Legacy Systems / BIOS</td><td>Maximum</td></tr>
+            </tbody>
+          </table>
+</div>
+      </section>
+
+      <!-- Tool: Prompt Enhancer -->
+      <section class="doc-page" id="page-tool-prompter">
+        <div class="card">
+          <h2 class="card-title">✨ Tool: Prompt Enhancer <span class="new-badge">NEW</span></h2>
+          <p>Takes a rough payload description or a basic DuckyScript snippet and uses the Groq AI engine to enhance it — adding proper timing, stealth improvements, error handling, and cross-platform compatibility.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Script Enhancement</h4><p>Paste a basic script and click <strong>Enhance</strong>. The AI rewrites it with proper DELAY values, DEFAULTDELAY pacing, and inline comments.</p></div>
+            <div class="tech-card"><h4>Stealth Optimization</h4><p>Request stealth mode — the AI adds window minimization steps, hides terminal windows, and removes visible artifacts from the script.</p></div>
+            <div class="tech-card"><h4>Prompt Rewriting</h4><p>Input a vague description and get a precise, detailed prompt that generates better results from the AI Payload Architect.</p></div>
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">AI Optimization Techniques</h3>
+          <p>When you click <strong>Enhance</strong>, the Qwen 3.8 27B model applies several heuristic passes to your raw script:</p>
+          <div class="steps">
+            <div class="step-item">
+              <div class="step-num">A</div>
+              <div class="step-content">
+                <h3>Timing Analysis</h3>
+                <p>Detects OS-level UI interactions (like opening the Run menu or launching apps) and automatically inserts appropriate <code>DELAY</code> commands (e.g., 500ms after <code>GUI r</code>).</p>
+              </div>
+            </div>
+            <div class="step-item">
+              <div class="step-num">B</div>
+              <div class="step-content">
+                <h3>Syntax Correction</h3>
+                <p>Fixes deprecated or invalid DuckyScript keywords, converting them to the strict format expected by the GhostChip interpreter.</p>
+              </div>
+            </div>
+            <div class="step-item">
+              <div class="step-num">C</div>
+              <div class="step-content">
+                <h3>Evasion Tactics</h3>
+                <p>If requested, adds commands to shrink windows, clear run history (<code>reg delete HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU</code>), and close terminals immediately upon completion.</p>
+              </div>
+            </div>
+          </div>
+</div>
+      </section>
+
+      <!-- Tool: Action Recorder -->
+      <section class="doc-page" id="page-tool-recorder">
+        <div class="card">
+          <h2 class="card-title">⏺ Tool: Action Recorder <span class="new-badge">NEW</span></h2>
+          <p>Record a live sequence of keyboard actions, delays, and macros in real-time, then replay or export them as a DuckyScript payload.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Live Recording</h4><p>Click <strong>Record</strong> and use the Live Keyboard tool. All keystrokes, modifier combos, and inter-key delays are captured into a script automatically.</p></div>
+            <div class="tech-card"><h4>Replay &amp; Edit</h4><p>Play back the recorded sequence, edit individual steps, adjust timing, or remove unwanted actions before saving or deploying.</p></div>
+            <div class="tech-card"><h4>Export to DuckyScript</h4><p>Convert the recorded macro into standard DuckyScript text format — save to SD or share for later deployment.</p></div>
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Creating Perfect Macros</h3>
+          <p>The Action Recorder completely eliminates the guesswork of writing DuckyScript timing delays. By recording your actual human interaction, the resulting script perfectly mirrors the required loading times of the target machine.</p>
+          <div class="alert-box">
+            <strong>✅ Workflow:</strong>
+            1. Hit <strong>Record</strong> on your mobile device.<br>
+            2. Switch to the <strong>Live Keyboard</strong> tab.<br>
+            3. Perform the desired action (e.g., Windows Key, type 'cmd', wait for it to appear, press Enter).<br>
+            4. Stop recording.<br>
+            5. The precise sequence, including your natural pauses (converted to <code>DELAY</code> commands), is instantly generated.
+          </div>
+          <p style="margin-top:16px;">You can then export this recording directly to your SD card as a <code>.txt</code> file, ready for rapid deployment or AutoRun triggering.</p>
+</div>
+      </section>
+
+      <!-- Tool: Favourites -->
+      <section class="doc-page" id="page-tool-favourites">
+        <div class="card">
+          <h2 class="card-title">⭐ Tool: Favourites <span class="new-badge">NEW</span></h2>
+          <p>Save frequently used DuckyScript payloads as starred favourites for instant one-tap access from the main Scripts page and the Tools drawer.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Star from Editor</h4><p>Click the ⭐ button in the DuckyScript editor toolbar to save the current script to Favourites. Optionally link it to an SD card file for auto-sync.</p></div>
+            <div class="tech-card"><h4>Category Tags</h4><p>Organize by tag: 🎯 Attack, 📡 Recon, 🔧 Utility, ✦ Custom. Filter the grid by tag for quick access during operations.</p></div>
+            <div class="tech-card"><h4>One-Tap Execute</h4><p>Tap a favourite card to load it into the editor instantly, or long-press to execute directly without opening the editor.</p></div>
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Managing the Arsenal</h3>
+          <p>Favourites are stored in the browser's persistent Local Storage, meaning they remain available even when connecting to different GhostChip devices.</p>
+          
+          <h3 style="margin:24px 0 12px; font-weight:700;">Tagging System</h3>
+          <p>Apply tags to organize your scripts for quick retrieval under pressure:</p>
+          <ul style="margin-left:20px; line-height:1.6; color:var(--dim);">
+            <li><strong>🎯 Attack:</strong> Offensive payloads, reverse shells, credential dumpers.</li>
+            <li><strong>📡 Recon:</strong> System enumeration, network mapping, vulnerability scanning.</li>
+            <li><strong>🔧 Utility:</strong> Pranks, automation, OS configuration tweaks.</li>
+          </ul>
+          <p style="margin-top:16px;">When editing a favourite, you can enable <strong>Auto-Sync</strong> to ensure any changes made in the editor are automatically saved back to the linked SD card file, keeping your physical payloads perfectly in sync with your web interface.</p>
+</div>
+      </section>
+
+      <!-- Tool: Vault -->
+      <section class="doc-page" id="page-tool-vault">
+        <div class="card">
+          <h2 class="card-title">🔒 Tool: Vault <span class="new-badge">NEW</span></h2>
+          <p>A secure credential store for keeping sensitive data (passwords, tokens, API keys) organized and accessible during audits — without embedding them as plaintext in payloads.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Encrypted Storage</h4><p>Credentials are stored in the browser's local storage with client-side encryption. Never transmitted to the device or any remote server.</p></div>
+            <div class="tech-card"><h4>Quick Insert</h4><p>Tap any stored credential to copy it to clipboard, or insert it directly into the DuckyScript editor as a <code>STRING</code> command.</p></div>
+            <div class="tech-card"><h4>Categories</h4><p>Organize by type: passwords, API keys, hashes, tokens. Search and filter instantly.</p></div>
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Zero-Knowledge Architecture</h3>
+          <p>The Vault tool is designed to prevent accidental leakage of your sensitive infrastructure data (like C2 IP addresses, API keys, or webhooks) during engagements.</p>
+          <ul style="margin-left:20px; line-height:1.6; color:var(--dim);">
+            <li><strong>No Plaintext on SD:</strong> Instead of hardcoding your webhook URL into a DuckyScript file on the SD card (which could be seized or analyzed), you store it in the Vault on your phone.</li>
+            <li><strong>Runtime Insertion:</strong> During an operation, you inject the credential directly from the Vault into the Live Keyboard stream.</li>
+            <li><strong>Local Encryption:</strong> Data is encrypted at rest using AES-256 within the browser's IndexedDB.</li>
+          </ul>
+          <div class="alert-box warn">
+            <strong>⚠️ Master Password:</strong>
+            The Vault requires a master password to decrypt upon opening the app. If you lose this password, the vault contents cannot be recovered.
+          </div>
+</div>
+      </section>
+
+      <!-- Tool: Shortcuts -->
+      <section class="doc-page" id="page-tool-shortcuts">
+        <div class="card">
+          <h2 class="card-title">⚡ Tool: Shortcuts <span class="new-badge">NEW</span></h2>
+          <p>A curated collection of one-tap system shortcuts that send common OS keyboard combinations to the target via USB HID — faster than opening the Live Keyboard for frequent operations.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Windows Shortcuts</h4><p>Run dialog (<code>GUI+R</code>), Task Manager (<code>CTRL+SHIFT+ESC</code>), Lock screen (<code>GUI+L</code>), Desktop (<code>GUI+D</code>), System Properties (<code>GUI+PAUSE</code>).</p></div>
+            <div class="tech-card"><h4>macOS Shortcuts</h4><p>Spotlight (<code>GUI+SPACE</code>), Finder, Force Quit (<code>GUI+ALT+ESC</code>), Screenshot (<code>GUI+SHIFT+4</code>), Terminal.</p></div>
+            <div class="tech-card"><h4>Linux Shortcuts</h4><p>Terminal launchers, workspace switching, application launchers — common across major desktop environments (GNOME, KDE).</p></div>
+          </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Rapid Triage & Evasion</h3>
+          <p>The Shortcuts grid provides massive tactical advantage during physical access scenarios where speed is critical. Instead of navigating menus or fumbling with the Live Keyboard, you can execute complex multi-key macros instantly.</p>
+          
+          <table class="tech-table">
+            <thead>
+              <tr><th>Shortcut Name</th><th>Key Combo Sent</th><th>Tactical Use</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><strong>Lock Workstation</strong></td><td><code>GUI + L</code> / <code>CTRL + CMD + Q</code></td><td>Securely locking the machine if interrupted.</td></tr>
+              <tr><td><strong>Task Manager</strong></td><td><code>CTRL + SHIFT + ESC</code></td><td>Instantly identifying security software.</td></tr>
+              <tr><td><strong>Minimize All</strong></td><td><code>GUI + M</code></td><td>Hiding active terminal windows instantly.</td></tr>
+              <tr><td><strong>Terminal/Run</strong></td><td><code>GUI + R</code></td><td>The universal entry point for payload execution.</td></tr>
+            </tbody>
+          </table>
+          <p style="margin-top:16px;">Shortcuts are OS-aware. Ensure you have the correct Target OS selected in the app settings so the correct modifier keys (GUI vs CMD) are injected.</p>
+</div>
+      </section>
+
       <!-- Tool 1: File Manager -->
       <section class="doc-page" id="page-tool-file">
         <div class="card">
@@ -1725,7 +2215,19 @@
             <strong>📂 Folder Mappings:</strong>
             Keep all compiled DuckyScript files in the <code>/payloads/</code> root folder and exfiltrated payloads under the <code>/exfil/</code> folder for correct dashboard indexing.
           </div>
-        </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">SD Card File Operations</h3>
+          <p>The File Manager provides full CRUD (Create, Read, Update, Delete) access to the GhostChip's MicroSD card over the air.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Upload Payloads</h4><p>Push new DuckyScript `.txt` files directly from your phone to the device without physically removing the SD card.</p></div>
+            <div class="tech-card"><h4>Download Loot</h4><p>Retrieve exfiltrated data files, network captures, or system logs gathered during an operation.</p></div>
+            <div class="tech-card"><h4>Live Editing</h4><p>Tap any text file to open it in the built-in code editor. Save changes directly to the SD card.</p></div>
+          </div>
+          <div class="alert-box">
+            <strong>💡 Speed Limitations:</strong>
+            Due to the SPI interface constraints of the ESP32-S3, file transfers are limited to approximately 200-300 KB/s. For large PCAP files or mass exfiltration, removing the physical SD card is recommended.
+          </div>
+</div>
       </section>
 
       <!-- Tool 2: AI Assistant -->
@@ -1767,7 +2269,37 @@
               </a>
             </div>
           </div>
-        </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Context-Aware Assistance</h3>
+          <p>The AI Assistant (powered by the Qwen 3.8 27B model) acts as your co-pilot. It understands the GhostChip's DuckyScript dialect and hardware constraints perfectly.</p>
+          <div class="steps">
+            <div class="step-item">
+              <div class="step-num">1</div>
+              <div class="step-content">
+                <h3>Script Debugging</h3>
+                <p>Paste a failing script. The AI will identify syntax errors, missing DELAY commands, or invalid modifier combinations.</p>
+              </div>
+            </div>
+            <div class="step-item">
+              <div class="step-num">2</div>
+              <div class="step-content">
+                <h3>Payload Generation</h3>
+                <p>Ask for a payload by intent. Example: "Generate a payload for macOS that opens Terminal and pings google.com".</p>
+              </div>
+            </div>
+            <div class="step-item">
+              <div class="step-num">3</div>
+              <div class="step-content">
+                <h3>Hardware Queries</h3>
+                <p>Ask questions about GhostChip features, LED status codes, or electrical limits without needing to consult this manual.</p>
+              </div>
+            </div>
+          </div>
+          <div class="alert-box warn">
+            <strong>Connectivity Required:</strong>
+            The AI Assistant requires the GhostChip to have an active internet connection via the WiFi Bridge. It communicates with the Groq Cloud API directly from the ESP32-S3.
+          </div>
+</div>
       </section>
 
       <!-- Tool 3: Script Builder -->
@@ -1795,7 +2327,22 @@
             <strong>💡 Pro-Tip:</strong>
             Use the <strong>Script Builder</strong> to construct the initial outline of your script, and then load it into the main editor to make fine-tuned timing adjustments.
           </div>
-        </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Visual Payload Construction</h3>
+          <p>The Script Builder offers a drag-and-drop or block-based interface for constructing payloads without memorizing syntax.</p>
+          <table class="tech-table">
+            <thead>
+              <tr><th>Block Type</th><th>Functionality</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><strong>System Actions</strong></td><td>Open Run, Open Terminal, Lock Screen, Minimize Windows.</td></tr>
+              <tr><td><strong>Execution</strong></td><td>Typing text, running shell commands, pressing Enter.</td></tr>
+              <tr><td><strong>Timing</strong></td><td>Delays, Wait for Network, Wait for Mount.</td></tr>
+              <tr><td><strong>Logic</strong></td><td>Repeat loops, Conditional OS detection (if supported by payload wrapper).</td></tr>
+            </tbody>
+          </table>
+          <p style="margin-top:16px;">Once built, the sequence can be exported directly to standard DuckyScript text and loaded into the main editor.</p>
+</div>
       </section>
 
       <!-- Tool 4: Payload Templates -->
@@ -1835,7 +2382,19 @@
             <strong>⚙️ Webhook Endpoint Substitution:</strong>
             Paste your custom exfiltration URL (e.g. from `ntfy.sh` or `webhook.site`) into the visual configurator card. The template engine automatically substitutes this URL into the payload variables before deployment.
           </div>
-        </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Curated Attack Vectors</h3>
+          <p>The Templates library contains pre-written, highly optimized payloads for common operational scenarios. These templates have been tested across multiple OS environments to ensure maximum reliability.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Reconnaissance</h4><p>Extract system info, wireless profiles, mapped drives, and active network connections. Often saves data back to the SD card.</p></div>
+            <div class="tech-card"><h4>Persistence</h4><p>Establish reverse shells, create hidden administrative accounts, or add scheduled tasks/cron jobs.</p></div>
+            <div class="tech-card"><h4>Pranks / Annoyances</h4><p>Harmless scripts for demonstrations: rotating the screen, changing wallpapers, or playing audio.</p></div>
+          </div>
+          <div class="alert-box">
+            <strong>💡 Customization:</strong>
+            Templates are loaded with placeholder variables (e.g., <code>[YOUR_IP_HERE]</code>). The UI will prompt you to fill in these variables before injecting the payload into the editor.
+          </div>
+</div>
       </section>
 
       <!-- Tool 5: Live Keyboard -->
@@ -1858,7 +2417,19 @@
               <p>Dedicated buttons to trigger shortcuts: open Windows Run dialog (`GUI+R`), open macOS Terminal, or close active application (`ALT+F4`).</p>
             </div>
           </div>
-        </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Real-Time HID Injection</h3>
+          <p>The Live Keyboard transforms your mobile device or browser into a physical keyboard connected to the target machine. Every keystroke is instantly serialized into a USB HID report and transmitted over the air.</p>
+          <div class="tech-grid">
+            <div class="tech-card"><h4>Modifier Lock Toggles</h4><p>Toggle CTRL, ALT, SHIFT, and GUI (Windows/CMD) buttons. They remain held down until toggled off, allowing for complex multi-key combinations.</p></div>
+            <div class="tech-card"><h4>Special Keys Drawer</h4><p>Access Function keys (F1-F12), navigation keys (Home, End, PageUp, PageDown), and system keys (PrintScreen, Insert) that may not exist on your mobile keyboard.</p></div>
+            <div class="tech-card"><h4>Macro Keys</h4><p>Assign custom text strings or DuckyScript sequences to quick-access macro buttons for instant deployment during live sessions.</p></div>
+          </div>
+          <div class="alert-box">
+            <strong>⚠️ Mobile Keyboard Caveats:</strong>
+            Virtual mobile keyboards (like iOS or Gboard) handle auto-correction and backspacing uniquely. GhostChip attempts to interpret these intelligently, but for the most reliable results, disable auto-correct during a live session or type deliberately.
+          </div>
+</div>
       </section>
 
       <!-- Tool 6: NeoPixel LED -->
@@ -1890,7 +2461,26 @@
               </div>
             </div>
           </div>
-        </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Status Indicators & Stealth</h3>
+          <p>The onboard WS2812B NeoPixel provides immediate visual feedback on the device's state. Using this tool, you can manually override the color or disable it completely.</p>
+          <table class="tech-table">
+            <thead>
+              <tr><th>System Status</th><th>Default Color Code</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><strong>Booting / Connecting</strong></td><td>Flashing Blue</td></tr>
+              <tr><td><strong>AP Mode Active (No Internet)</strong></td><td>Solid Cyan</td></tr>
+              <tr><td><strong>WiFi Bridge Active (Internet)</strong></td><td>Solid Green</td></tr>
+              <tr><td><strong>Executing Payload</strong></td><td>Flashing Red</td></tr>
+              <tr><td><strong>Error / Failure</strong></td><td>Rapid Flashing Yellow</td></tr>
+            </tbody>
+          </table>
+          <div class="alert-box warn">
+            <strong>Stealth Mode:</strong>
+            Toggle the LED off entirely for covert operations. This setting is saved to NVS and persists across reboots. Note that physical execution will still occur; you just won't have visual confirmation.
+          </div>
+</div>
       </section>
 
       <!-- Tool 7: Device Info -->
@@ -1935,7 +2525,17 @@
               </tr>
             </tbody>
           </table>
-        </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">System Diagnostics</h3>
+          <p>The Device Info panel provides real-time telemetry and hardware status straight from the ESP32-S3 core.</p>
+          <ul style="margin-left:20px; line-height:1.6; color:var(--dim);">
+            <li><strong>Heap Memory:</strong> Monitor available RAM. Important if running extremely large DuckyScript strings.</li>
+            <li><strong>SD Card Status:</strong> Verify mount status, format (must be FAT32), total capacity, and free space.</li>
+            <li><strong>WiFi Signal (RSSI):</strong> Check the signal strength of the bridged network. Useful for positioning the device.</li>
+            <li><strong>Uptime:</strong> See how long the device has been powered on.</li>
+          </ul>
+          <p style="margin-top:16px;">This page also displays your unique Device ID (MAC address), which is useful if you are managing a fleet of GhostChips and need to distinguish them on a network.</p>
+</div>
       </section>
 
       <!-- Tool 8: Payload Simulator -->
@@ -1958,7 +2558,33 @@
               <p>Step through lines one by one to verify delay timings and keyboard modifier combos safely.</p>
             </div>
           </div>
-        </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Safe Sandboxed Testing</h3>
+          <p>The Payload Simulator parses your DuckyScript and provides a visual timeline of exactly what it will do, without actually sending any keystrokes to the host machine.</p>
+          <div class="steps">
+            <div class="step-item">
+              <div class="step-num">1</div>
+              <div class="step-content">
+                <h3>Execution Timeline</h3>
+                <p>Calculates the total runtime based on <code>DELAY</code> and <code>DEFAULTDELAY</code> values, helping you predict how long an operation will take.</p>
+              </div>
+            </div>
+            <div class="step-item">
+              <div class="step-num">2</div>
+              <div class="step-content">
+                <h3>Key Sequence Visualization</h3>
+                <p>Shows exactly which modifier keys will be held down and in what order, making it easy to spot logic errors in complex combos.</p>
+              </div>
+            </div>
+            <div class="step-item">
+              <div class="step-num">3</div>
+              <div class="step-content">
+                <h3>OS Warning Checks</h3>
+                <p>Flags commands that might behave differently on Windows vs macOS (e.g., warning you if you use <code>GUI</code> in a script intended for Linux).</p>
+              </div>
+            </div>
+          </div>
+</div>
       </section>
 
       <!-- Tool 9: OTA Flash Updater -->
@@ -2004,7 +2630,21 @@
               Launch Web Serial Flasher
             </a>
           </div>
-        </div>
+        
+          <h3 style="margin:24px 0 12px; font-weight:700;">Over-The-Air Updates</h3>
+          <p>Update the GhostChip firmware wirelessly without needing USB data cables, esptool, or command-line flashing utilities.</p>
+          <div class="alert-box">
+            <strong>✅ Update Process:</strong>
+            1. Download the latest <code>.bin</code> firmware file from the official repository.<br>
+            2. Connect to the GhostChip dashboard.<br>
+            3. Open the OTA Updater tool and select the <code>.bin</code> file.<br>
+            4. Click Flash. The device will upload the binary, write it to the OTA partition, and automatically reboot into the new firmware.
+          </div>
+          <div class="alert-box warn">
+            <strong>⚠️ Critical Warning:</strong>
+            Do not disconnect power during an OTA update. If the flash is interrupted, the device may soft-brick. If this happens, you will need to recover the device using a wired USB connection and standard ESP32 flashing tools.
+          </div>
+</div>
       </section>
 
 
@@ -2108,7 +2748,7 @@
 
   <!-- ══ FOOTER ══ -->
   <footer>
-    &copy; 2026 GAMKERS WORKSHOP &bull; WORLD'S FIRST AI-POWERED BADUSB PLATFORM &bull; TECHNICAL AUDIT SERVICES ONLY
+    &copy; 2026 GAMKERS WORKSHOP &bull; GHOSTCHIP FIRMWARE v3.3.1 &bull; WORLD'S FIRST AI-POWERED BADUSB PLATFORM &bull; AUTHORIZED AUDIT USE ONLY
   </footer>
 
   <!-- ══ JAVASCRIPT FOR INTERACTION ══ -->
@@ -2141,12 +2781,14 @@
       // Hide all doc pages
       document.querySelectorAll('.doc-page').forEach(page => page.classList.remove('active'));
 
-      // Close mobile menu if active
-      const sidebar = document.querySelector('.sidebar');
-      const backdrop = document.getElementById('menu-backdrop');
-      if (sidebar.classList.contains('open')) {
-        sidebar.classList.remove('open');
-        backdrop.classList.remove('active');
+      // Close mobile drawer ONLY on mobile viewport (sidebar is fixed off-canvas there)
+      if (window.innerWidth <= 900) {
+        const sidebar = document.querySelector('.sidebar');
+        const backdrop = document.getElementById('menu-backdrop');
+        if (sidebar && sidebar.classList.contains('open')) {
+          sidebar.classList.remove('open');
+          backdrop.classList.remove('active');
+        }
       }
 
       // Activate clicked sub-link & show corresponding doc page
@@ -2166,8 +2808,14 @@
       const targetPage = document.getElementById('page-' + pageId);
       if (targetPage) {
         targetPage.classList.add('active');
-        // Scroll main viewport back to top smoothly
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        // Scroll to top — use the scrollable content-area on desktop,
+        // fall back to window on mobile where the page itself scrolls
+        const contentArea = document.querySelector('.content-area');
+        if (contentArea && contentArea.scrollHeight > contentArea.clientHeight) {
+          contentArea.scrollTo({ top: 0, behavior: 'smooth' });
+        } else {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
       }
     }
 
