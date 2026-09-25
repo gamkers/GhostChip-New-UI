@@ -1772,20 +1772,20 @@ function clearApiKey() {
     .then(() => toast('Key cleared', 'warn'));
 }
 
-// ─── OpenRouter API Key (For AI Agent) ───
+// ─── Groq API Key (For AI Agent) ───
 let OPENROUTER_KEY = localStorage.getItem('gc_openrouter_key') || '';
 
 function saveOpenRouterApiKey() {
   const k = $('openrouterApiKeyInput')?.value?.trim();
-  if (!k) { toast('Enter OpenRouter API key first', 'warn'); return; }
+  if (!k) { toast('Enter Groq API key first', 'warn'); return; }
   OPENROUTER_KEY = k;
   localStorage.setItem('gc_openrouter_key', k);
-  toast('OpenRouter API Key saved ✓');
+  toast('Groq API Key saved ✓');
   if ($('openrouterApiKeyInput')) $('openrouterApiKeyInput').value = '';
 }
 
 function clearOpenRouterApiKey() {
-  if (!confirm('Clear OpenRouter API key?')) return;
+  if (!confirm('Clear Groq API key?')) return;
   OPENROUTER_KEY = '';
   localStorage.removeItem('gc_openrouter_key');
   toast('OpenRouter Key cleared', 'warn');
@@ -1882,10 +1882,22 @@ function selectWifi(ssid) {
 }
 async function connectWifi() {
   if (!selectedSsid) return;
+  const pass = $('wifiPassInput').value;
   try {
+    const autoSave = $('wifiAutoConnectCheck') && $('wifiAutoConnectCheck').checked;
+    if (autoSave) {
+      await fmFetchPost('/fm/mkdir?path=%2Fwificonnect').catch(() => {});
+      const uploadUrl = fmBase() + '/fm/upload?path=%2Fwificonnect';
+      const blob = new Blob([pass], { type: 'text/plain' });
+      const file = new File([blob], selectedSsid + '.txt', { type: 'text/plain' });
+      const fd = new FormData();
+      fd.append('file', file, selectedSsid + '.txt');
+      await fetch(uploadUrl, { method: 'POST', body: fd }).catch(() => {});
+    }
+
     await deviceFetch('/wifi/connect', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'ssid=' + encodeURIComponent(selectedSsid) + '&pass=' + encodeURIComponent($('wifiPassInput').value)
+      body: 'ssid=' + encodeURIComponent(selectedSsid) + '&pass=' + encodeURIComponent(pass)
     });
     toast('Connected to ' + selectedSsid + ' ✓');
   } catch (e) { toast('Connection failed', 'err'); }
@@ -4841,7 +4853,8 @@ let agentRunning = false;
 let agentAbort = false;
 let agentHistory = [];   // persists across runs within session
 let agentInspectorOpen = false;
-const AGENT_MODEL = 'poolside/laguna-xs-2.1';
+const AGENT_MODEL = 'z-ai/glm-5.3-flash';
+const AGENT_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
 // ─── System Prompt ────────────────────────────────────────────
 const AGENT_SYSTEM_PROMPT = `You are GhostChip AI Agent — an autonomous HID operator for a GhostChip ESP32 device that physically injects keystrokes, manages SD card files & directories, controls WiFi, and drives an RGB LED.
@@ -4880,15 +4893,19 @@ execute_script
 run_script
   Runs an existing DuckyScript file saved on the SD card by path. Input: file path (e.g. /utility/notes.txt)
 
+set_autorun
+  Sets a specific DuckyScript payload to run automatically every time GhostChip boots.
+  Input (JSON): {"content": "GUI SPACE\\nDELAY 1000\\nSTRING hello\\nENTER"}
+
 list_files
-  Lists files and folders on SD card. Input: directory path (e.g. / or /utility or /Shortcuts)
+  Lists files and folders on SD card. The agent can browse the file manager. Input: directory path (e.g. / or /utility)
 
 read_file
-  Reads contents of a file on the SD card. Input: file path (e.g. /utility/notes.txt)
+  Reads contents of a file on the SD card so you can review or edit it. Input: file path (e.g. /utility/notes.txt)
 
 write_file
   Creates or overwrites a file on the SD card (auto-creates parent directories if needed).
-  Input format (JSON): {"path": "/utility/notes.txt", "content": "GUI SPACE\\nDELAY 2000\\nSTRING notes\\nDELAY 2000\\nENTER\\nDELAY 2000"}
+  Input format (JSON): {"path": "/utility/notes.txt", "content": "..."}
 
 create_directory
   Creates a new folder on the SD card. Input: folder path (e.g. /utility)
@@ -4938,6 +4955,67 @@ run_shortcut
 generate_enhanced_prompt
   Converts a core instruction into a structured Master System Prompt using Qwen 3.6. Input: core request
 
+mouse_move
+  Moves the mouse cursor on the connected target machine.
+  Input (JSON): {"x": 100, "y": 50, "relative": true}
+  (Set 'relative' to true for offset movement, false for absolute coordinates)
+
+mouse_click
+  Triggers a mouse button click on the target machine.
+  Input (String): "left", "right", or "middle"
+
+toggle_mouse_jiggler
+  Jiggles the mouse back and forth N times.
+  Input (JSON): {"times": 10}
+
+toggle_drunk_mouse
+  Moves the mouse randomly N times.
+  Input (JSON): {"times": 10}
+
+toggle_auto_clicker
+  Clicks the mouse exactly N times.
+  Input (JSON): {"times": 10, "interval_ms": 50}
+
+gamepad_control
+  Sends virtual USB Gamepad commands to the target.
+  Input (JSON): {"btn": 1, "x": 127, "y": -127} (Buttons are bitmask: 1=A, 2=B, 4=X, 8=Y)
+
+media_control
+  Controls media playback and volume on the target host via HID media keys.
+  Input (String): "vol_up", "vol_down", "mute", "play_pause", "next_track", or "prev_track"
+
+presentation_control
+  Sends presentation/slideshow commands to the target via HID keys.
+  Input (String): "next_slide", "prev_slide", or "black_screen"
+
+active_deauth_test
+  Triggers a gated active WiFi deauth stress test against a specific target.
+  IMPORTANT: Always call wifi_scan FIRST to obtain the target's MAC (BSSID). The scan output includes "MAC: xx:xx:xx:xx:xx:xx" for each network.
+  If target_mac is omitted, the agent will attempt to auto-resolve it via a fresh scan.
+  Input (JSON): {"target_mac": "00:11:22:33:44:55", "target_ssid": "NetworkName"}
+
+flipper_zero_alert
+  Starts or stops active BLE polling specifically watching for Flipper Zero devices.
+  Input (String): "start" or "stop"
+
+vault_read
+  Reads the ENCRYPTED contents of a vault file. (You cannot read plaintext).
+  Input (String): key name (e.g. "github_token")
+
+vault_write
+  Encrypts and saves a credential to the vault.
+  Input (JSON): {"key": "github_token", "value": "my_secret_password"}
+
+vault_type
+  Securely types a saved vault credential directly to the target host via USB HID. 
+  The password is automatically decrypted and injected locally; it is never exposed to you (the AI).
+  Input (String): key name (e.g. "github_token")
+
+vault_type
+  Securely types a saved vault credential directly to the target host via USB HID. 
+  The password is automatically decrypted and injected locally; it is never exposed to you (the AI).
+  Input (String): key name (e.g. "github_token")
+
 ## EXAMPLE SCENARIO: Create script in folder & run it
 User: Create a script called notes inside utility which should open notes in my mac and run it.
 
@@ -4984,7 +5062,7 @@ const agentTools = {
     const keyToUse = OPENROUTER_KEY || localStorage.getItem('gc_openrouter_key') || '';
     if (!keyToUse) return 'Error: No OpenRouter API key configured. Go to Settings → OpenRouter API Key and add your key.';
 
-    const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+    const endpoint = AGENT_ENDPOINT;
     const modelToUse = AGENT_MODEL;
 
     const sysPrompt = `STRICT DUCKYSCRIPT SYNTAX RULES:
@@ -5201,6 +5279,29 @@ const agentTools = {
   async execute_script_by_path(input) { return this.run_script(input); },
   async run_file(input) { return this.run_script(input); },
 
+  async set_autorun(input) {
+    let content = '';
+    try {
+      const parsed = JSON.parse(input);
+      content = parsed.content || parsed.script || '';
+    } catch {
+      content = input.trim();
+    }
+    if (!content) return 'Error: payload content is required to set autorun.';
+    try {
+      await fmFetchPost('/fm/mkdir?path=%2Fautorun').catch(() => { });
+      const uploadUrl = fmBase() + '/fm/upload?path=' + encodeURIComponent('/autorun');
+      const blob = new Blob([content], { type: 'text/plain' });
+      const file = new File([blob], 'autorun.txt', { type: 'text/plain' });
+      const form = new FormData();
+      form.append('file', file, 'autorun.txt');
+      await fetch(uploadUrl, { method: 'POST', body: form });
+      return `Autorun successfully configured! The payload will execute automatically next time GhostChip boots.`;
+    } catch (e) {
+      return 'Error setting autorun: ' + e.message;
+    }
+  },
+
   async wifi_scan(_input) {
     try {
       let nets = null;
@@ -5227,7 +5328,14 @@ const agentTools = {
 
       if (arr && arr.length > 0) {
         arr.sort((a, b) => (b.rssi || 0) - (a.rssi || 0));
-        return arr.map(n => `📶 ${n.ssid || '(hidden)'} [${n.secure ? '🔒 WPA/WPA2' : '🔓 OPEN'}] (${n.rssi || 0} dBm, CH ${n.channel || '?'})`).join('\n');
+        return arr.map(n => {
+          const mac = n.bssid || n.mac || n.BSSID || 'unknown-mac';
+          const ssid = n.ssid || n.SSID || '(hidden)';
+          const sec = n.secure || n.authmode ? '🔒 WPA/WPA2' : '🔓 OPEN';
+          const rssi = n.rssi || n.RSSI || 0;
+          const ch = n.channel || n.Channel || '?';
+          return `📶 SSID: ${ssid} | MAC: ${mac} | ${sec} | ${rssi} dBm | CH ${ch}`;
+        }).join('\n');
       }
 
       return 'WiFi scan complete: No networks found in range.';
@@ -5378,20 +5486,23 @@ const agentTools = {
   async script_status(input) { return this.get_execution_status(input); },
 
   async deauth_monitor(input) {
-    const mode = (input || 'get_logs').toLowerCase().trim();
+    const mode = (input || 'status').toLowerCase().trim();
     try {
-      if (mode.includes('start')) {
-        await deviceFetch('/deauth/start', { method: 'POST' });
-        return 'WiFi Deauth attack monitor started.';
-      } else if (mode.includes('stop')) {
+      if (mode.includes('stop')) {
         await deviceFetch('/deauth/stop', { method: 'POST' });
-        return 'WiFi Deauth attack monitor stopped.';
+        return 'WiFi Deauth attack stopped.';
       } else {
-        const data = await deviceGet('/deauth/results');
-        if (data && data.events && data.events.length > 0) {
-          return data.events.map(e => `⚠ DEAUTH Attack detected from ${e.mac} (CH ${e.ch}, ${e.rssi} dBm)`).join('\n');
+        const data = await deviceGet('/deauth/status');
+        if (data) {
+          if (data.running) {
+            return `⚡ Active deauth is RUNNING against MAC ${data.bssid}. Frames sent: ${data.frames}`;
+          } else if (data.armed) {
+            return `Deauth is ARMED but not running.`;
+          } else {
+            return `Deauth is currently IDLE.`;
+          }
         }
-        return 'No WiFi deauth attacks detected.';
+        return 'Could not get deauth status.';
       }
     } catch (e) {
       return 'Deauth monitor query failed: ' + e.message;
@@ -5433,7 +5544,272 @@ const agentTools = {
       return 'Error generating enhanced prompt: ' + e.message;
     }
   },
-  async enhance_prompt(input) { return this.generate_enhanced_prompt(input); }
+  async enhance_prompt(input) { return this.generate_enhanced_prompt(input); },
+
+  // ─── Mouse & Input Simulation ─────────────────────────────────
+  async mouse_move(input) {
+    let x = 0, y = 0, relative = true;
+    try {
+      const p = JSON.parse(input);
+      x = p.x || 0; y = p.y || 0;
+      relative = p.relative !== false;
+    } catch {
+      return 'Error: input must be JSON {"x":100,"y":50,"relative":true}';
+    }
+    try {
+      await deviceFetch('/mouse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `x=${x}&y=${y}`
+      });
+      return `Mouse moved ${relative ? 'by offset' : 'to absolute'} (${x}, ${y}).`;
+    } catch (e) {
+      return 'Error moving mouse: ' + e.message;
+    }
+  },
+
+  async mouse_click(input) {
+    const btn = (input || 'left').toLowerCase().trim();
+    if (!['left', 'right', 'middle'].includes(btn)) {
+      return 'Error: input must be "left", "right", or "middle"';
+    }
+    try {
+      await deviceFetch('/mouse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `click=${btn}`
+      });
+      return `Mouse ${btn}-click sent to target.`;
+    } catch (e) {
+      return 'Error clicking mouse: ' + e.message;
+    }
+  },
+
+  async toggle_mouse_jiggler(input) {
+    let times = 10;
+    try { times = JSON.parse(input).times || 10; } catch { }
+    try {
+      for (let i = 0; i < times; i++) {
+        await deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'x=10&y=10' });
+        await new Promise(r => setTimeout(r, 200));
+        await deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'x=-10&y=-10' });
+        if (i < times - 1) await new Promise(r => setTimeout(r, 200));
+      }
+      return `Jiggled the mouse ${times} times.`;
+    } catch (e) { return `Mouse jiggler error: ` + e.message; }
+  },
+
+  async toggle_drunk_mouse(input) {
+    let times = 10;
+    try { times = JSON.parse(input).times || 10; } catch { }
+    try {
+      for (let i = 0; i < times; i++) {
+        const rx = Math.floor(Math.random() * 40) - 20;
+        const ry = Math.floor(Math.random() * 40) - 20;
+        await deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `x=${rx}&y=${ry}` });
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return `Drunk mouse ran for ${times} movements.`;
+    } catch (e) { return `Drunk mouse error: ` + e.message; }
+  },
+
+  async toggle_auto_clicker(input) {
+    let interval_ms = 50, times = 10;
+    try {
+      const p = JSON.parse(input);
+      interval_ms = p.interval_ms || 50;
+      times = p.times || 10;
+    } catch { }
+    try {
+      for (let i = 0; i < times; i++) {
+        await deviceFetch('/mouse', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'click=left' });
+        if (i < times - 1) await new Promise(r => setTimeout(r, interval_ms));
+      }
+      return `Auto-clicked ${times} times.`;
+    } catch (e) { return `Auto-clicker error: ` + e.message; }
+  },
+
+  async gamepad_control(input) {
+    let btn = 0, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0, hat = 0;
+    try {
+      const p = JSON.parse(input);
+      btn = p.btn || 0; x = p.x || 0; y = p.y || 0; z = p.z || 0;
+      rx = p.rx || 0; ry = p.ry || 0; rz = p.rz || 0; hat = p.hat || 0;
+    } catch {
+      return 'Error: input must be JSON like {"btn":1, "x":127}';
+    }
+    try {
+      await deviceFetch('/gamepad', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `btn=${btn}&x=${x}&y=${y}&z=${z}&rx=${rx}&ry=${ry}&rz=${rz}&hat=${hat}`
+      });
+      return `Gamepad input sent.`;
+    } catch (e) { return `Gamepad error: ` + e.message; }
+  },
+
+  // ─── Media & Presentation Tools ───────────────────────────────
+  async media_control(input) {
+    const cmd = (input || '').toLowerCase().trim();
+    const keyMap = {
+      'vol_up':      'vol_up',
+      'vol_down':    'vol_down',
+      'mute':        'mute',
+      'play_pause':  'play_pause',
+      'next_track':  'next',
+      'prev_track':  'prev'
+    };
+    const key = keyMap[cmd];
+    if (!key) return 'Error: input must be one of: vol_up, vol_down, mute, play_pause, next_track, prev_track';
+    try {
+      await deviceFetch('/media', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `cmd=${key}`
+      });
+      return `Media command sent: ${cmd}`;
+    } catch (e) {
+      return 'Error sending media command: ' + e.message;
+    }
+  },
+
+  async presentation_control(input) {
+    const cmd = (input || '').toLowerCase().trim();
+    const keyMap = {
+      'next_slide':  'RIGHT',
+      'prev_slide':  'LEFT',
+      'black_screen': 'b'
+    };
+    const key = keyMap[cmd];
+    if (!key) return 'Error: input must be one of: next_slide, prev_slide, black_screen';
+    try {
+      await deviceFetch('/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'duckyscript=' + encodeURIComponent(`STRING ${key}`)
+      });
+      return `Presentation command sent: ${cmd}`;
+    } catch (e) {
+      return 'Error sending presentation command: ' + e.message;
+    }
+  },
+
+  // ─── Advanced Recon & Network ──────────────────────────────────
+  async active_deauth_test(input) {
+    let target_mac = '', target_ssid = '';
+    try {
+      const p = JSON.parse(input);
+      target_mac = p.target_mac || '';
+      target_ssid = p.target_ssid || '';
+    } catch {
+      return 'Error: input must be JSON {"target_mac":"00:11:22:33:44:55","target_ssid":"NetworkName"}. Run wifi_scan first to get the MAC (BSSID) of the target network.';
+    }
+    if (!target_ssid) return 'Error: target_ssid is required. Run wifi_scan first to get the SSID and MAC of the target.';
+    // If no MAC provided, attempt to resolve it from a fresh scan
+    if (!target_mac) {
+      try {
+        const scanResult = await this.wifi_scan('');
+        const lines = scanResult.split('\n');
+        const match = lines.find(l => l.toLowerCase().includes(target_ssid.toLowerCase()));
+        if (match) {
+          const macMatch = match.match(/MAC:\s*([0-9A-Fa-f:]{17})/);
+          if (macMatch) target_mac = macMatch[1];
+        }
+      } catch (_) {}
+    }
+    if (!target_mac) {
+      return `Could not resolve MAC for SSID "${target_ssid}". Please run wifi_scan first, then provide the MAC address manually.`;
+    }
+    try {
+      const tkn = typeof WIFITESTING_TOKEN !== 'undefined' ? WIFITESTING_TOKEN : 'I_OWN_THIS_NETWORK';
+      await deviceFetch('/scan_and_deauth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `bssid=${encodeURIComponent(target_mac)}&confirm=${encodeURIComponent(tkn)}`
+      });
+      return `⚡ Active deauth test launched against SSID: "${target_ssid}" (MAC: ${target_mac}). Use deauth_monitor to track results.`;
+    } catch (e) {
+      return 'Error starting active deauth test: ' + e.message;
+    }
+  },
+
+  async flipper_zero_alert(input) {
+    const action = (input || 'start').toLowerCase().trim();
+    const endpoint = action.includes('stop') ? '/ble/flipper/stop' : '/ble/flipper/start';
+    try {
+      await deviceFetch(endpoint, { method: 'POST' });
+      return action.includes('stop')
+        ? 'Flipper Zero alert watcher stopped.'
+        : '🐬 Flipper Zero alert active — will notify if any Flipper Zero enters BLE range.';
+    } catch (e) {
+      return `Flipper Zero alert ${action} sent: ` + e.message;
+    }
+  },
+
+  // ─── Vault / Credential Storage ───────────────────────────────
+  async vault_read(input) {
+    const key = (input || '').trim();
+    if (!key) return 'Error: key name is required';
+    try {
+      const r = await fmFetch('/fm/download?path=' + encodeURIComponent('/Vault/' + key + '.txt'));
+      if (!r.ok) return `Vault key "${key}" not found.`;
+      const text = await r.text();
+      return `🔐 ENCRYPTED Vault key "${key}" contents (Agent cannot decrypt this):\n${text}`;
+    } catch (e) {
+      return 'Error reading vault: ' + e.message;
+    }
+  },
+
+  async vault_write(input) {
+    let key = '', value = '';
+    try {
+      const p = JSON.parse(input);
+      key = p.key || '';
+      value = p.value !== undefined ? String(p.value) : '';
+    } catch {
+      return 'Error: input must be JSON {"key":"name","value":"secret"}';
+    }
+    if (!key || !value) return 'Error: key and value required';
+    try {
+      const content = `DELAY 500\nSTRING ${value}`;
+      const encryptedContent = 'ENC:' + encryptVault(content);
+      await fmFetchPost('/fm/mkdir?path=%2FVault').catch(() => { });
+      const uploadUrl = fmBase() + '/fm/upload?path=%2FVault';
+      const blob = new Blob([encryptedContent], { type: 'text/plain' });
+      const file = new File([blob], key + '.txt', { type: 'text/plain' });
+      const fd = new FormData();
+      fd.append('file', file, key + '.txt');
+      await fetch(uploadUrl, { method: 'POST', body: fd });
+      return `🔐 Credential "${key}" saved to Encrypted Vault successfully.`;
+    } catch (e) {
+      return 'Error writing to vault: ' + e.message;
+    }
+  },
+
+  async vault_type(input) {
+    const key = (input || '').trim();
+    if (!key) return 'Error: key name is required';
+    try {
+      const path = `/Vault/${key}.txt`;
+      const r = await fmFetch('/fm/download?path=' + encodeURIComponent(path));
+      if (!r.ok) return `Error: Vault key "${key}" not found.`;
+      const text = await r.text();
+      let scriptToRun = text;
+      if (text.startsWith('ENC:')) {
+        const b64 = text.substring(4);
+        if (typeof decryptVault !== 'function') return 'Error: Vault decryption unavailable.';
+        scriptToRun = decryptVault(b64);
+      }
+      await deviceFetch('/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'duckyscript=' + encodeURIComponent(scriptToRun)
+      });
+      return `Vault credentials for "${key}" successfully typed via USB HID.`;
+    } catch (e) {
+      return `Failed to type vault credentials for "${key}": ` + e.message;
+    }
+  }
 };
 
 // ─── PROMPT ENHANCER APP ───
@@ -5525,7 +5901,7 @@ async function peGenerate() {
     return;
   }
 
-  const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+  const endpoint = AGENT_ENDPOINT;
   const modelToUse = AGENT_MODEL;
 
   const stylePrompts = {
@@ -5703,8 +6079,8 @@ function agentSetStatus(state, text) {
 function agentSetButtons(running) {
   const runBtn = $('agentRunBtn');
   const stopBtn = $('agentStopBtn');
-  if (runBtn) runBtn.disabled = running;
-  if (stopBtn) stopBtn.disabled = !running;
+  if (runBtn) runBtn.style.display = running ? 'none' : 'flex';
+  if (stopBtn) stopBtn.style.display = running ? 'flex' : 'none';
 }
 
 function toggleAgentInspector() {
@@ -5733,7 +6109,7 @@ async function runAgent(userMessage) {
     return;
   }
 
-  const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+  const endpoint = AGENT_ENDPOINT;
   const modelToUse = AGENT_MODEL;
 
   const headers = {
@@ -5788,7 +6164,7 @@ async function runAgent(userMessage) {
         llmRes = (apiData.choices[0]?.message?.content || '').trim();
       } catch (e) {
         if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
-        appendAgentLog('error', 'OpenRouter API Error', e.message);
+        appendAgentLog('error', 'Groq API Error', e.message);
         agentHistory.push({ role: 'assistant', content: 'Error: ' + e.message });
         break;
       }
@@ -5819,6 +6195,7 @@ async function runAgent(userMessage) {
       if (finalMatch) {
         let finalStr = finalMatch[1].trim().replace(/^Thought:\s*/i, '');
         appendAgentLog('final', 'Done ✓', finalStr);
+        speakAgentText(finalStr);
         agentSetStatus('idle', 'Completed ✓');
         break;
       }
@@ -5835,6 +6212,7 @@ async function runAgent(userMessage) {
         }
         if (cleanContent) {
           appendAgentLog('observation', 'Response', cleanContent);
+          speakAgentText(cleanContent);
         }
         agentSetStatus('idle', 'Completed ✓');
         break;
@@ -5896,6 +6274,86 @@ async function runAgent(userMessage) {
     if (agentSetStatus && !$('agentStatusLabel')?.textContent.startsWith('Completed')) {
       // only update if not already set to completed
     }
+    if (typeof agentVoiceMode !== 'undefined' && agentVoiceMode) {
+      setTimeout(() => startSpeechRecognition(), 500);
+    }
+  }
+}
+
+// ─── Agent Voice Mode (Jarvis) ──────────────────────────────────
+let agentVoiceMode = false;
+let agentRecognition = null;
+let agentJarvisVoice = null;
+
+function initVoiceMode() {
+  if ('speechSynthesis' in window) {
+    window.speechSynthesis.onvoiceschanged = () => {
+      const voices = window.speechSynthesis.getVoices();
+      agentJarvisVoice = voices.find(v => v.name.includes('Google UK English Male') || v.name.includes('Daniel') || (v.lang === 'en-GB' && v.name.includes('Male'))) || voices.find(v => v.lang.startsWith('en')) || voices[0];
+    };
+  }
+}
+
+function speakAgentText(text) {
+  if (!agentVoiceMode || !('speechSynthesis' in window) || !text) return;
+  window.speechSynthesis.cancel();
+  const clean = text.replace(/[\u2700-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD10-\uDDFF]/g, ''); // strip emojis
+  const utterance = new SpeechSynthesisUtterance(clean);
+  if (agentJarvisVoice) utterance.voice = agentJarvisVoice;
+  utterance.rate = 1.15;
+  utterance.pitch = 1.1;
+  window.speechSynthesis.speak(utterance);
+}
+
+function toggleVoiceMode() {
+  agentVoiceMode = !agentVoiceMode;
+  const btn = $('agentVoiceBtn');
+  if (agentVoiceMode) {
+    btn.style.color = '#00FF41';
+    toast('Voice Mode Enabled - Listening...', 'ok');
+    startSpeechRecognition();
+  } else {
+    btn.style.color = 'var(--dim)';
+    toast('Voice Mode Disabled', 'warn');
+    if (agentRecognition) agentRecognition.stop();
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  }
+}
+
+function startSpeechRecognition() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    toast('Speech Recognition not supported in this browser.', 'err');
+    agentVoiceMode = false;
+    $('agentVoiceBtn').style.color = 'var(--dim)';
+    return;
+  }
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!agentRecognition) {
+    agentRecognition = new SpeechRec();
+    agentRecognition.continuous = true;
+    agentRecognition.interimResults = false;
+    agentRecognition.lang = 'en-US';
+
+    agentRecognition.onresult = (event) => {
+      if (!agentVoiceMode) return;
+      const transcript = event.results[event.results.length - 1][0].transcript.trim();
+      if (transcript && !agentRunning) {
+        $('agentInput').value = transcript;
+        runAgentFromInput();
+      }
+    };
+
+    agentRecognition.onerror = (event) => { console.log('Speech error:', event.error); };
+
+    agentRecognition.onend = () => {
+      if (agentVoiceMode && !agentRunning) {
+        try { agentRecognition.start(); } catch(e){}
+      }
+    };
+  }
+  
+  if (!agentRunning) {
+    try { agentRecognition.start(); } catch(e){}
   }
 }
 
@@ -5904,6 +6362,7 @@ function initAiAgent() {
   agentAbort = false;
   agentSetStatus('idle', 'Idle — ready for instructions');
   agentSetButtons(false);
+  initVoiceMode();
   // Focus input
   setTimeout(() => { const ta = $('agentInput'); if (ta) ta.focus(); }, 200);
 }
