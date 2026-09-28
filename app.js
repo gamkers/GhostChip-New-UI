@@ -174,7 +174,6 @@ function initApp() {
     updateLines();
     localStorage.setItem('gc_script', $('editor').value);
   });
-  $('editor').addEventListener('scroll', () => { $('lineNums').scrollTop = $('editor').scrollTop; });
   if ($('ipInput')) $('ipInput').addEventListener('change', () => localStorage.setItem('gc_ip', $('ipInput').value.trim()));
   // Try loading API key from device EEPROM if we don't have one locally
   loadApiKeyFromDevice();
@@ -596,7 +595,6 @@ async function triggerAiCopilot(remComment) {
         top_p: 0.95,
         max_tokens: 2048,
         max_completion_tokens: 2048,
-        reasoning_effort: 'default',
         stop: null
       })
     });
@@ -2460,7 +2458,6 @@ async function aiGenerate() {
         top_p: 0.95,
         max_tokens: 2048,
         max_completion_tokens: 2048,
-        reasoning_effort: 'default',
         stop: null
       })
     });
@@ -2512,7 +2509,6 @@ async function aiConvertOS(newOS) {
         top_p: 1,
         max_tokens: 2048,
         max_completion_tokens: 2048,
-        reasoning_effort: 'default',
         stop: null
       })
     });
@@ -6092,7 +6088,6 @@ async function peGenerate() {
         top_p: 0.95,
         max_tokens: 2048,
         max_completion_tokens: 2048,
-        reasoning_effort: 'default',
         stop: null
       })
     });
