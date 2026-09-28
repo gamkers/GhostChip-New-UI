@@ -4559,6 +4559,7 @@ function initMouseApp() {
     if (pad.hasAttribute('data-mouse-init')) return;
     pad.setAttribute('data-mouse-init', '1');
 
+    // --- Touch Events ---
     pad.addEventListener('touchstart', e => {
       e.preventDefault();
       mouseLastX = e.touches[0].clientX;
@@ -4579,7 +4580,6 @@ function initMouseApp() {
       const currentX = e.touches[0].clientX;
       const currentY = e.touches[0].clientY;
       
-      // Scale delta for faster mouse movement feel
       const dx = Math.round((currentX - mouseLastX) * 1.5);
       const dy = Math.round((currentY - mouseLastY) * 1.5);
       
@@ -4587,9 +4587,7 @@ function initMouseApp() {
       mouseLastY = currentY;
 
       if (e.touches.length === 2) {
-        // Two-finger scroll
         if (dy !== 0) {
-          // Send scaled vertical scroll command; pulling down scrolls up (standard scroll direction)
           let scrollAmt = Math.round(-dy / 2);
           if (scrollAmt !== 0) {
             deviceFetch('/mouse', {
@@ -4601,14 +4599,13 @@ function initMouseApp() {
           }
         }
       } else {
-        // Single-finger movement
         if (dx !== 0 || dy !== 0) {
           deviceFetch('/mouse', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: `x=${dx}&y=${dy}`
           });
-          mouseThrottle = setTimeout(() => { mouseThrottle = null; }, 40); // ~25 FPS
+          mouseThrottle = setTimeout(() => { mouseThrottle = null; }, 40);
         }
       }
     }, { passive: false });
@@ -4619,12 +4616,80 @@ function initMouseApp() {
         const duration = Date.now() - mouseTapStart;
         const dist = Math.hypot(mouseLastX - mouseTapX, mouseLastY - mouseTapY);
         
-        // If it was a quick tap with very little movement
         if (duration < 250 && dist < 15) {
           if (mouseMaxTouches === 1) sendMouseClick('left');
           else if (mouseMaxTouches >= 2) sendMouseClick('right');
         }
-        mouseMaxTouches = 0; // reset for next touch
+        mouseMaxTouches = 0;
+      }
+    }, { passive: false });
+
+    // --- Mouse Events for PC ---
+    let isMouseDown = false;
+    
+    pad.addEventListener('mousedown', e => {
+      e.preventDefault();
+      isMouseDown = true;
+      mouseLastX = e.clientX;
+      mouseLastY = e.clientY;
+      mouseTapX = mouseLastX;
+      mouseTapY = mouseLastY;
+      mouseTapStart = Date.now();
+    });
+
+    pad.addEventListener('mousemove', e => {
+      e.preventDefault();
+      if (!isMouseDown) return;
+      if (mouseThrottle) return;
+      
+      const currentX = e.clientX;
+      const currentY = e.clientY;
+      
+      const dx = Math.round((currentX - mouseLastX) * 1.5);
+      const dy = Math.round((currentY - mouseLastY) * 1.5);
+      
+      mouseLastX = currentX;
+      mouseLastY = currentY;
+
+      if (dx !== 0 || dy !== 0) {
+        deviceFetch('/mouse', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: `x=${dx}&y=${dy}`
+        });
+        mouseThrottle = setTimeout(() => { mouseThrottle = null; }, 40);
+      }
+    });
+
+    const handleMouseUp = (e) => {
+      if (!isMouseDown) return;
+      e.preventDefault();
+      isMouseDown = false;
+      const duration = Date.now() - mouseTapStart;
+      const dist = Math.hypot(mouseLastX - mouseTapX, mouseLastY - mouseTapY);
+      
+      if (duration < 250 && dist < 15) {
+        if (e.button === 2) sendMouseClick('right');
+        else sendMouseClick('left');
+      }
+    };
+    
+    pad.addEventListener('mouseup', handleMouseUp);
+    pad.addEventListener('mouseleave', () => isMouseDown = false);
+    
+    pad.addEventListener('contextmenu', e => e.preventDefault());
+    
+    pad.addEventListener('wheel', e => {
+      e.preventDefault();
+      if (mouseThrottle) return;
+      let scrollAmt = Math.round(-e.deltaY / 20); // Adjust scroll speed for wheel
+      if (scrollAmt !== 0) {
+        deviceFetch('/mouse', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: `scroll=${scrollAmt}`
+        });
+        mouseThrottle = setTimeout(() => { mouseThrottle = null; }, 40);
       }
     }, { passive: false });
   });
