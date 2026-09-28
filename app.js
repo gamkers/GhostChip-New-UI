@@ -246,21 +246,40 @@ function highlightDucky(code) {
 function escHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 function updateLines() {
-  const code = $('editor').value;
+  const ed = $('editor');
+  const code = ed ? ed.value : '';
   const lines = code.split('\n').length;
   $('lineNums').innerHTML = Array.from({ length: lines }, (_, i) => `<span>${i + 1}</span>`).join('');
   $('lineCount').textContent = lines + ' line' + (lines !== 1 ? 's' : '');
   // Syntax highlight overlay
   const hl = $('editorHighlight');
   if (hl) hl.querySelector('code').innerHTML = highlightDucky(code) + '\n';
+  // Re-sync scroll position after content update
+  if (ed) {
+    const st = ed.scrollTop;
+    $('lineNums').scrollTop = st;
+    if (hl) {
+      const code = hl.querySelector('code');
+      if (code) code.style.transform = `translateY(-${st}px)`;
+    }
+  }
 }
 updateLines();
-// Sync scroll between editor and highlight
+// Sync scroll between editor, line-numbers, and highlight overlay
 const edEl = $('editor');
 if (edEl) {
   edEl.addEventListener('scroll', () => {
     const hl = $('editorHighlight');
-    if (hl) { hl.scrollTop = edEl.scrollTop; hl.scrollLeft = edEl.scrollLeft; }
+    const ln = $('lineNums');
+    const st = edEl.scrollTop;
+    const sl = edEl.scrollLeft;
+    // Sync line numbers
+    if (ln) ln.scrollTop = st;
+    // Sync highlight: translate the inner code element to match scroll
+    if (hl) {
+      const code = hl.querySelector('code');
+      if (code) code.style.transform = `translateY(-${st}px) translateX(-${sl}px)`;
+    }
   });
 }
 
@@ -442,10 +461,14 @@ function cleanDuckyScriptOutput(rawText) {
     text = text.replace(/```[\w]*\n?/g, '').trim();
   }
 
-  // 3. Fix key syntax errors (e.g. "GUI space" -> "GUI SPACE", "gui space" -> "GUI SPACE")
+  // 3. Fix key syntax errors
   text = text.replace(/^GUI\s+space\b/gim, 'GUI SPACE');
   text = text.replace(/^gui\s+space\b/gim, 'GUI SPACE');
   text = text.replace(/^gui\s+/gim, 'GUI ');
+  // GUI + single uppercase letter must be lowercase (e.g. GUI R → GUI r, GUI X → GUI x)
+  // DuckyScript requires: GUI r (Run), GUI x (Win+X), GUI d (Desktop), etc.
+  // Only match a single letter followed by end-of-line or whitespace (not part of a longer word like SPACE)
+  text = text.replace(/^(GUI )([A-Z])(?=[^A-Z]|$)/gm, (_, prefix, letter) => prefix + letter.toLowerCase());
   text = text.replace(/^string\s+/gim, 'STRING ');
   text = text.replace(/^delay\s+/gim, 'DELAY ');
   text = text.replace(/^enter\b/gim, 'ENTER');
@@ -1883,7 +1906,10 @@ function selectWifi(ssid) {
 async function connectWifi() {
   if (!selectedSsid) return;
   const pass = $('wifiPassInput').value;
+  const connectBtn = document.querySelector('.wifi-connect-btn') || document.querySelector('[onclick="connectWifi()"]');
+
   try {
+    // Optionally auto-save credentials
     const autoSave = $('wifiAutoConnectCheck') && $('wifiAutoConnectCheck').checked;
     if (autoSave) {
       await fmFetchPost('/fm/mkdir?path=%2Fwificonnect').catch(() => {});
@@ -1895,12 +1921,60 @@ async function connectWifi() {
       await fetch(uploadUrl, { method: 'POST', body: fd }).catch(() => {});
     }
 
+    // Send connect request (may return opaque response on no-cors)
     await deviceFetch('/wifi/connect', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: 'ssid=' + encodeURIComponent(selectedSsid) + '&pass=' + encodeURIComponent(pass)
     });
-    toast('Connected to ' + selectedSsid + ' ✓');
-  } catch (e) { toast('Connection failed', 'err'); }
+
+    // Show "Connecting…" while we verify
+    toast('Connecting to ' + selectedSsid + '…', 'warn', 14000);
+    if (connectBtn) { connectBtn.disabled = true; connectBtn.textContent = 'Connecting…'; }
+
+    // Poll /info to verify actual connection (ESP32 WiFi STA connect takes 3-10 seconds)
+    const targetSsid = selectedSsid;
+    let connected = false;
+    const MAX_POLLS = 8;
+    const POLL_INTERVAL_MS = 1500;
+
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+      try {
+        const info = await deviceGet('/info');
+        // Check if device reports being connected to our SSID
+        const staSsid = info.sta_ssid || info.ssid || info.connected_ssid || info.wifi_ssid || '';
+        const staIp   = info.sta_ip   || info.ip   || info.wifi_ip   || '';
+        const staConnected = info.sta_connected !== undefined ? info.sta_connected :
+                             info.wifi_connected !== undefined ? info.wifi_connected : null;
+
+        const ssidMatch = staSsid.toLowerCase() === targetSsid.toLowerCase();
+        const hasIp = staIp && staIp !== '0.0.0.0' && staIp !== '';
+        const confirmedConnected = (ssidMatch && hasIp) ||
+                                   (ssidMatch && staConnected === true) ||
+                                   (staConnected === true && staSsid !== '');
+
+        if (confirmedConnected) {
+          connected = true;
+          break;
+        }
+      } catch (e) {
+        // /info might fail mid-reconnect — keep polling
+      }
+    }
+
+    // Dismiss the "Connecting…" toast by triggering a new one
+    if (connected) {
+      toast('✓ Connected to ' + targetSsid + '!', 'ok', 4000);
+    } else {
+      toast('✗ Connection failed — wrong password or timeout', 'err', 5000);
+    }
+
+  } catch (e) {
+    toast('Connection request failed: ' + e.message, 'err');
+  } finally {
+    if (connectBtn) { connectBtn.disabled = false; connectBtn.textContent = 'Connect'; }
+  }
 }
 
 // ─── BLE Scan ───
@@ -2363,28 +2437,22 @@ async function aiGenerate() {
           {
             role: 'system',
             content: `STRICT DUCKYSCRIPT SYNTAX RULES:
-1. ALL DuckyScript keywords and key names MUST be UPPERCASE (e.g. GUI SPACE, ENTER, STRING, DELAY 2000). NEVER write "GUI space".
-2. EXECUTING TERMINAL COMMANDS: Every shell command typed with "STRING <cmd>" MUST be followed by "ENTER" to execute it!
+1. ALL DuckyScript keywords MUST be UPPERCASE (DELAY, STRING, ENTER, GUI, CTRL, ALT, SHIFT, SPACE, etc).
+2. GUI KEY RULE — CRITICAL: When GUI is used with a letter key, the letter MUST be lowercase. Examples: "GUI r" (NOT "GUI R"), "GUI x" (NOT "GUI X"), "GUI d" (NOT "GUI D"). For the Windows key alone use: "GUI SPACE" for search/spotlight. NEVER write GUI followed by an uppercase letter.
+3. WINDOWS KEY: Use "GUI" for the Windows/Command key. "GUI r" opens Run dialog on Windows. "GUI SPACE" opens Spotlight on Mac.
+4. EXECUTING TERMINAL COMMANDS: Every shell command typed with "STRING <cmd>" MUST be followed by "ENTER" to execute it!
    Example:
-   GUI SPACE
+   GUI r
    DELAY 2000
-   STRING terminal
+   STRING notepad
    DELAY 2000
    ENTER
    DELAY 2000
    STRING mkdir ducky
    DELAY 2000
    ENTER
-   DELAY 2000
-   STRING cd ducky
-   DELAY 2000
-   ENTER
-   DELAY 2000
-   STRING echo "What is a HID attack?" > ducky.txt
-   DELAY 2000
-   ENTER
-3. Always insert DELAY 2000 after each action line.
-4. Output ONLY raw executable DuckyScript code lines. DO NOT output reasoning, thinking process, preamble, or markdown. ${getOSContext()}`
+5. Always insert DELAY 2000 after each action line.
+6. Output ONLY raw executable DuckyScript code lines. DO NOT output reasoning, thinking process, preamble, or markdown. ${getOSContext()}`
           },
           { role: 'user', content: prompt }
         ],
@@ -4155,8 +4223,11 @@ async function processAssistantRequest(query) {
             1. If the user asks a general question (e.g. "what is python", "who are you"), answer briefly as an expert. Set "script" to null.
             2. If the user asks for a technical action or HID payload (e.g. "open notepad", "extract wifi"), provide a short text response AND the DuckyScript for ${assistOS}.
             You MUST respond in JSON: {"text": "verbal reply", "script": "duckyscript or null"}.
-            Use proper DuckyScript syntax: DELAY, STRING, ENTER, GUI, ALT, CTRL, SHIFT, TAB, SPACE, UP, DOWN, LEFT, RIGHT, REM, F1-F12, CAPSLOCK, etc. for windows use GUI for windows key and for mac spotlight use GUI SPACE there is no CMD.
-            *NOTE: ALWAYS add DELAY 2000 after each action line in DuckyScript*,
+            DUCKYSCRIPT RULES (STRICTLY FOLLOW):
+            - Use: DELAY, STRING, ENTER, GUI, ALT, CTRL, SHIFT, TAB, SPACE, UP, DOWN, LEFT, RIGHT, REM, F1-F12, CAPSLOCK.
+            - GUI KEY RULE — CRITICAL: When GUI is combined with a letter, the letter MUST be lowercase. Examples: "GUI r" (opens Run on Windows), "GUI x" (Win+X), "GUI d" (show desktop). NEVER write "GUI R", "GUI X", "GUI D" — uppercase letter after GUI will FAIL.
+            - Use "GUI" for the Windows key (Windows) or Command key (Mac). "GUI SPACE" for Mac Spotlight. "GUI r" for Windows Run dialog.
+            - ALWAYS add DELAY 2000 after each action line in DuckyScript.
             Text replies must be under 100 words.`
           },
           { role: 'user', content: query }
@@ -5007,14 +5078,9 @@ vault_write
   Input (JSON): {"key": "github_token", "value": "my_secret_password"}
 
 vault_type
-  Securely types a saved vault credential directly to the target host via USB HID. 
-  The password is automatically decrypted and injected locally; it is never exposed to you (the AI).
-  Input (String): key name (e.g. "github_token")
-
-vault_type
-  Securely types a saved vault credential directly to the target host via USB HID. 
-  The password is automatically decrypted and injected locally; it is never exposed to you (the AI).
-  Input (String): key name (e.g. "github_token")
+  Securely types a saved vault credential directly to the target host via USB HID.
+  The password is automatically decrypted and injected locally; it is NEVER exposed to you (the AI) — you will never see the plaintext password.
+  Input (String): key name (e.g. "github_token" or "facebook")
 
 ## EXAMPLE SCENARIO: Create script in folder & run it
 User: Create a script called notes inside utility which should open notes in my mac and run it.
@@ -5066,28 +5132,22 @@ const agentTools = {
     const modelToUse = AGENT_MODEL;
 
     const sysPrompt = `STRICT DUCKYSCRIPT SYNTAX RULES:
-1. ALL DuckyScript keywords and key names MUST be UPPERCASE (e.g. GUI SPACE, ENTER, STRING, DELAY 2000). NEVER write "GUI space".
-2. EXECUTING TERMINAL COMMANDS: Every shell command typed with "STRING <cmd>" MUST be followed by "ENTER" to execute it!
+1. ALL DuckyScript keywords MUST be UPPERCASE (DELAY, STRING, ENTER, GUI, CTRL, ALT, SHIFT, SPACE, etc).
+2. GUI KEY RULE — CRITICAL: When GUI is used with a letter key, the letter MUST be lowercase. Examples: "GUI r" (NOT "GUI R"), "GUI x" (NOT "GUI X"), "GUI d" (NOT "GUI D"). For the Windows key with a shortcut, always use lowercase letter. NEVER write GUI followed by an uppercase letter.
+3. WINDOWS KEY: Use "GUI" for the Windows/Command key. "GUI r" opens Run dialog on Windows. "GUI SPACE" opens Spotlight on Mac.
+4. EXECUTING TERMINAL COMMANDS: Every shell command typed with "STRING <cmd>" MUST be followed by "ENTER" to execute it!
    Example:
-   GUI SPACE
+   GUI r
    DELAY 2000
-   STRING terminal
+   STRING cmd
    DELAY 2000
    ENTER
    DELAY 2000
    STRING mkdir ducky
    DELAY 2000
    ENTER
-   DELAY 2000
-   STRING cd ducky
-   DELAY 2000
-   ENTER
-   DELAY 2000
-   STRING echo "What is a HID attack?" > ducky.txt
-   DELAY 2000
-   ENTER
-3. Always insert DELAY 2000 after each action line.
-4. Output ONLY raw executable DuckyScript code lines. DO NOT output reasoning, thinking process, preamble, or markdown.`;
+5. Always insert DELAY 2000 after each action line.
+6. Output ONLY raw executable DuckyScript code lines. DO NOT output reasoning, thinking process, preamble, or markdown.`;
 
     const headers = {
       'Content-Type': 'application/json',
@@ -5397,7 +5457,25 @@ const agentTools = {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: `ssid=${encodeURIComponent(ssid)}&password=${encodeURIComponent(password)}`
       });
-      return `Connection request sent for SSID: ${ssid}`;
+      // Poll /info to verify actual connection (ESP32 takes 3–10s to connect)
+      const MAX_POLLS = 8;
+      const POLL_MS = 1500;
+      for (let i = 0; i < MAX_POLLS; i++) {
+        await new Promise(r => setTimeout(r, POLL_MS));
+        try {
+          const info = await deviceGet('/info');
+          const staSsid = info.sta_ssid || info.ssid || info.connected_ssid || info.wifi_ssid || '';
+          const staIp   = info.sta_ip   || info.ip   || info.wifi_ip   || '';
+          const staConnected = info.sta_connected !== undefined ? info.sta_connected :
+                               info.wifi_connected !== undefined ? info.wifi_connected : null;
+          const ssidMatch = staSsid.toLowerCase() === ssid.toLowerCase();
+          const hasIp = staIp && staIp !== '0.0.0.0' && staIp !== '';
+          if ((ssidMatch && hasIp) || (ssidMatch && staConnected === true) || (staConnected === true && staSsid !== '')) {
+            return `✅ Connected to "${ssid}" successfully. Device IP: ${staIp || 'unknown'}`;
+          }
+        } catch (_) { /* keep polling */ }
+      }
+      return `❌ Connection to "${ssid}" failed — wrong password or network unreachable. The device did not acquire an IP address within the timeout.`;
     } catch (e) {
       return 'Error connecting: ' + e.message;
     }
@@ -5787,25 +5865,36 @@ const agentTools = {
   },
 
   async vault_type(input) {
-    const key = (input || '').trim();
+    const key = (input || '').trim().replace(/[\\/]/g, '');
     if (!key) return 'Error: key name is required';
     try {
-      const path = `/Vault/${key}.txt`;
-      const r = await fmFetch('/fm/download?path=' + encodeURIComponent(path));
-      if (!r.ok) return `Error: Vault key "${key}" not found.`;
-      const text = await r.text();
-      let scriptToRun = text;
-      if (text.startsWith('ENC:')) {
-        const b64 = text.substring(4);
+      // Try the key name directly first, then try with common sanitization
+      const tryPaths = [
+        `/Vault/${key}.txt`,
+        `/Vault/${key.replace(/[^a-zA-Z0-9_\-]/g, '')}.txt`
+      ];
+      let text = null;
+      for (const path of tryPaths) {
+        const r = await fmFetch('/fm/download?path=' + encodeURIComponent(path));
+        if (r.ok) { text = await r.text(); break; }
+      }
+      if (text === null) return `Error: Vault key "${key}" not found. Use list_files on /Vault to see available keys.`;
+      let scriptToRun = text.trim();
+      if (scriptToRun.startsWith('ENC:')) {
+        const b64 = scriptToRun.substring(4);
         if (typeof decryptVault !== 'function') return 'Error: Vault decryption unavailable.';
         scriptToRun = decryptVault(b64);
+      }
+      // Ensure there is a DELAY before STRING to give the target field time to focus
+      if (!scriptToRun.startsWith('DELAY') && scriptToRun.includes('STRING')) {
+        scriptToRun = 'DELAY 800\n' + scriptToRun;
       }
       await deviceFetch('/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'duckyscript=' + encodeURIComponent(scriptToRun)
       });
-      return `Vault credentials for "${key}" successfully typed via USB HID.`;
+      return `✅ Vault credential "${key}" successfully typed via USB HID. The password was injected securely without being exposed.`;
     } catch (e) {
       return `Failed to type vault credentials for "${key}": ` + e.message;
     }
